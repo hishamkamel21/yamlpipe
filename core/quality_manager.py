@@ -44,6 +44,7 @@ class QualityManager:
         # Extract structured layers directly from QualityChecksParser output
         self.schema_checks = parsed_config.get("schema_checks", [])
         self.columns_checks = parsed_config.get("columns_checks", {"error_expr": [], "warn_expr": []})
+        self.registered_error_suffixes = parsed_config.get("registered_error_suffixes", [])
         self.table_checks = parsed_config.get("table_checks", {"expr": "", "temp_views_to_create": []})
 
         # Dynamic check availability summary
@@ -178,6 +179,7 @@ class QualityManager:
             table_name=self.table_name,
             flags=self.flags,
             check_summary=self.check_summary,
+            error_suffixes=self.registered_error_suffixes,
             batch_id=batch_id
         )
 

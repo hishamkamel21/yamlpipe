@@ -17,30 +17,47 @@ class QualityChecksParser:
 
         Returns:
             dict: {
+                "table": "catalog.schema.table_name",
                 "schema_checks": [ ... raw yaml objects ... ],
                 "columns_checks": {
                     "error_expr": [ ... list of SQL expressions ... ],
                     "warn_expr": [ ... list of SQL expressions ... ]
                 },
-                "table_checks": [ ... list of parsed table expressions/configs ... ]
+                "registered_error_suffixes": [ ... list of error suffixes ... ],
+                "table_checks": {
+                    "expr": "...",
+                    "temp_views_to_create": [...]
+                }
             }
         """
+        # 1. Extract target table identifier from the top-level YAML configuration
+        table_identifier = (
+            yaml_config.get("table")
+            or yaml_config.get("table_name")
+            or yaml_config.get("target_table")
+        )
+
         quality_config = yaml_config.get("quality_checks", yaml_config)
 
-        # 1. Parse Schema Checks (returns raw YAML objects)
+        # 2. Parse Schema Checks (returns raw YAML objects)
         schema_results = SchemaQualityParser.parse_yaml_checks(quality_config)
 
-        # 2. Parse Column Checks (returns SQL expressions in Python Lists)
+        # 3. Parse Column Checks (returns SQL expressions & registered_error_suffixes)
         column_results = ColumnQualityParser.parse_yaml_checks(quality_config)
 
-        # 3. Parse Table Checks (delegates to TableQualityParser)
+        # 4. Parse Table Checks (delegates to TableQualityParser)
         table_results = TableQualityParser.parse_yaml_checks(quality_config)
 
         return {
+            "table": table_identifier,
             "schema_checks": schema_results.get("schema_checks", []),
             "columns_checks": column_results.get("columns_checks", {
                 "error_expr": [],
                 "warn_expr": []
             }),
-            "table_checks": table_results.get("table_checks", [])
+            "registered_error_suffixes": column_results.get("registered_error_suffixes", []),
+            "table_checks": table_results.get("table_checks", {
+                "expr": "",
+                "temp_views_to_create": []
+            })
         }
