@@ -1,6 +1,6 @@
 import logging
 from typing import Dict, Any, List
-from yamlpipe.registries.transformation_registry import TransformationRegistry
+from yamlpipe.registry.transformation_registry import TransformationRegistry
 from yamlpipe.utility.helper import Helper
 
 logger = logging.getLogger("TransformationParser")
