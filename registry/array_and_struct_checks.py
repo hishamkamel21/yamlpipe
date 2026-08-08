@@ -5,6 +5,8 @@ logger = logging.getLogger("ArrayAndStructChecks")
 
 class ArrayAndStructChecks:
 
+    EMPTY_ARRAY_SQL = "CAST(array() AS ARRAY<STRING>)"
+
     @classmethod
     def _extract_base_params(cls, check: dict, column: str):
         """Helper to safely access base params without top-level circular import."""
@@ -57,7 +59,7 @@ class ArrayAndStructChecks:
         CASE
             WHEN ({when_cond}) AND ({cast_cond})
             THEN array('{column}_ARRAY_EMPTY_ERROR')
-            ELSE array()
+            ELSE {cls.EMPTY_ARRAY_SQL}
         END
         """
         return sql, severity
@@ -85,7 +87,7 @@ class ArrayAndStructChecks:
                  AND size({col_expr}) > 0 
                  AND ({cast_cond})
             THEN array('{column}_ARRAY_INVALID_VALUES_ERROR')
-            ELSE array()
+            ELSE {cls.EMPTY_ARRAY_SQL}
         END
         """
         return sql, severity
@@ -114,7 +116,7 @@ class ArrayAndStructChecks:
         CASE
             WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({condition})
             THEN array('{column}_ARRAY_LENGTH_ERROR')
-            ELSE array()
+            ELSE {cls.EMPTY_ARRAY_SQL}
         END
         """
         return sql, severity
@@ -130,7 +132,7 @@ class ArrayAndStructChecks:
         CASE
             WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({cast_cond})
             THEN array('{column}_ARRAY_CONTAINS_NULL_ERROR')
-            ELSE array()
+            ELSE {cls.EMPTY_ARRAY_SQL}
         END
         """
         return sql, severity
@@ -146,7 +148,7 @@ class ArrayAndStructChecks:
         CASE
             WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({cast_cond})
             THEN array('{column}_ARRAY_DUPLICATE_VALUES_ERROR')
-            ELSE array()
+            ELSE {cls.EMPTY_ARRAY_SQL}
         END
         """
         return sql, severity
@@ -161,7 +163,7 @@ class ArrayAndStructChecks:
         CASE
             WHEN ({when_cond}) AND ({col_expr} IS NULL)
             THEN array('{column}_STRUCT_EMPTY_ERROR')
-            ELSE array()
+            ELSE {cls.EMPTY_ARRAY_SQL}
         END
         """
         return sql, severity
@@ -185,7 +187,7 @@ class ArrayAndStructChecks:
         CASE
             WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({condition})
             THEN array('{column}_STRUCT_FIELD_NULL_ERROR')
-            ELSE array()
+            ELSE {cls.EMPTY_ARRAY_SQL}
         END
         """
         return sql, severity
