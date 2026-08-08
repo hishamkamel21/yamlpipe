@@ -19,10 +19,10 @@ class ColumnQualityRegistry:
         Delegates array_* and struct_* checks to ArrayAndStructChecks.
         """
         try:
-            if not isinstance(check, dict) or "check_type" not in check:
+            if not isinstance(check, dict) or "check_type" not in check or "type" not in check:
                 raise KeyError(f"Check definition for column '{column}' must contain 'check_type'.")
 
-            check_type = check["check_type"].lower().strip()
+            check_type = check.get("check_type",check.get("type",None))
             logger.debug(f"Routing check '{check_type}' for column '{column}'")
 
             prefix = check_type.split("_")[0]
