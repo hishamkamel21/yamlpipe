@@ -1,7 +1,6 @@
 import uuid
 from typing import Dict, Any, List
-from final_yaml_pipe.registry.table_quality_checks import TableQualityRegistry
-
+from yamlpipe.registry.table_quality_checks import TableQualityRegistry
 
 class TableQualityParser:
 
@@ -29,7 +28,6 @@ class TableQualityParser:
             elif check_type in ("lookup", "foreign_key"):
                 ref_view = f"tmp_ref_{uuid.uuid4().hex[:8]}"
                 
-                # استخراج الـ Metadata فقط للمستقبل
                 ref_meta = check.get("ref") if isinstance(check.get("ref"), dict) else check
                 view_metadata = {
                     "view_name": ref_view,

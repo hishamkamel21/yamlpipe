@@ -1,7 +1,7 @@
 
 import logging
 from typing import Dict, Any, List
-from yamlpipe.registries.column_quality_registry import ColumnQualityRegistry
+from yamlpipe.registry.columns_quality_registry import ColumnQualityRegistry
 
 logger = logging.getLogger("ColumnQualityParser")
 

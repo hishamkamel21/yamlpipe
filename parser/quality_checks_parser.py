@@ -1,8 +1,8 @@
 import logging
 from typing import Dict, Any
-from yamlpipe.parsers.column_quality_parser import ColumnQualityParser
-from yamlpipe.parsers.schema_quality_parser import SchemaQualityParser
-from yamlpipe.parsers.table_quality_parser import TableQualityParser
+from yamlpipe.parser.columns_quality_parser import ColumnQualityParser
+from yamlpipe.parser.schema_checks_parser import SchemaQualityParser
+from yamlpipe.parser.table_quality_parser import TableQualityParser
 
 logger = logging.getLogger("QualityChecksParser")
 
