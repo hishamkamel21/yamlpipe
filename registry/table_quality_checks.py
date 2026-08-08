@@ -1,0 +1,126 @@
+
+import logging
+import uuid
+from typing import Dict, Any, Tuple
+from yamlpipe.utility.helper import Helper
+
+logger = logging.getLogger("TableQualityRegistry")
+
+
+class TableQualityRegistry:
+
+    # -------------------------------------------------------------------------
+    # 1. DUPLICATE CHECK EXPR
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def build_duplicate_expr(check: Dict[str, Any]) -> str:
+        output_column = check.get("output_column", "is_duplicate")
+        raw_keys = check.get("keys", [])
+
+        if not raw_keys:
+            raise ValueError(f"[Duplicate Check Error] Missing required 'keys'. Config: {check}")
+
+        partition_cols = ", ".join([Helper.clean_multiline_sql(k) for k in raw_keys])
+        
+        orderby_expr = (
+            check.get("orderby") 
+            or check.get("order_by") 
+            or check.get("orderby_column") 
+            or check.get("order_by_column") 
+        )
+
+        order_by_clause = ""
+        if orderby_expr:
+            cleaned_order = Helper.clean_multiline_sql(str(orderby_expr))
+            order_by_clause = f"ORDER BY {cleaned_order} DESC"
+
+        return f"CASE WHEN ROW_NUMBER() OVER (PARTITION BY {partition_cols} {order_by_clause}) > 1 THEN 1 ELSE 0 END AS `{output_column}`"
+
+    # -------------------------------------------------------------------------
+    # 2. LOOKUP CHECK EXPR
+    # -------------------------------------------------------------------------
+    @classmethod
+    def build_lookup_expr(cls, check: Dict[str, Any], ref_view: str) -> str:
+        output_column = check.get("output_column", "is_lookup_failed")
+        join_keys = check.get("keys", check.get("join_keys", []))
+
+        if not join_keys:
+            raise ValueError(f"[Lookup Check Error] Missing join keys under 'keys' or 'join_keys'. Config: {check}")
+
+        filter_sql = ""
+        if check.get("filter"):
+            filter_sql = f"AND ({Helper.clean_multiline_sql(check['filter'])})"
+
+        join_conditions = " AND ".join([f"tmp_src.`{k}` = r.`{k}`" for k in join_keys])
+
+        should_broadcast = check.get("broadcast", True)
+        broadcast_hint = "/*+ BROADCAST(r) */" if should_broadcast else ""
+
+        return f"""CASE WHEN NOT EXISTS (
+            SELECT {broadcast_hint} 1 
+            FROM {ref_view} r 
+            WHERE {join_conditions} {filter_sql}
+        ) THEN 1 ELSE 0 END AS `{output_column}`"""
+
+    # -------------------------------------------------------------------------
+    # 3. FOREIGN KEY CHECK EXPR
+    # -------------------------------------------------------------------------
+    @classmethod
+    def build_foreign_key_expr(cls, check: Dict[str, Any], ref_view: str) -> str:
+        output_column = check.get("output_column", "is_fk_violation")
+        fk_col = check.get("foreign_key")
+        ref_cfg = check.get("ref", {})
+
+        if isinstance(ref_cfg, str):
+            ref_cfg = {"table": ref_cfg}
+
+        ref_key = ref_cfg.get("key", fk_col)
+        cleaned_fk_col = Helper.clean_multiline_sql(fk_col)
+        cleaned_ref_key = Helper.clean_multiline_sql(ref_key)
+
+        ref_filter_sql = ""
+        if ref_cfg.get("filter"):
+            ref_filter_sql = f"AND ({Helper.clean_multiline_sql(ref_cfg['filter'])})"
+
+        should_broadcast = ref_cfg.get("broadcast", True)
+        broadcast_hint = "/*+ BROADCAST(r) */" if should_broadcast else ""
+
+        return f"""CASE WHEN `{cleaned_fk_col}` IS NOT NULL AND NOT EXISTS (
+            SELECT {broadcast_hint} 1 
+            FROM {ref_view} r 
+            WHERE r.`{cleaned_ref_key}` = `{cleaned_fk_col}` {ref_filter_sql}
+        ) THEN 1 ELSE 0 END AS `{output_column}`"""
+
+    # -------------------------------------------------------------------------
+    # 4. FRESHNESS CHECK EXPR
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def build_freshness_expr(check: Dict[str, Any]) -> str:
+        output_column = check.get("output_column", "freshness_lag_seconds")
+        
+        ts_column = (
+            check.get("freshness_column") 
+            or check.get("timestamp_column") 
+            or check.get("ts_column")
+        )
+        unit = str(check.get("unit", "seconds")).lower()
+
+        if not ts_column:
+            raise ValueError(f"[Freshness Check Error] Missing timestamp column specification. Config: {check}")
+
+        ts_column_expr = Helper.clean_multiline_sql(str(ts_column))
+
+        if unit == "max_timestamp":
+            return f"MAX({ts_column_expr}) OVER () AS `{output_column}`"
+        
+        ref_ts_sql = Helper.clean_multiline_sql(check["ref_timestamp"]) if check.get("ref_timestamp") else "CURRENT_TIMESTAMP()"
+
+        divisor = 1.0
+        if unit == "hours":
+            divisor = 3600.0
+        elif unit == "days":
+            divisor = 86400.0
+        elif unit != "seconds":
+            raise ValueError(f"[Freshness Check Error] Unsupported freshness unit '{unit}'.")
+
+        return f"(UNIX_TIMESTAMP({ref_ts_sql}) - UNIX_TIMESTAMP(MAX({ts_column_expr}) OVER ())) / {divisor} AS `{output_column}`"
