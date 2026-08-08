@@ -85,14 +85,14 @@ class QualityManager:
 
         try:
             if error_exprs:
-                errors_sql = f"array_compact(array_flatten(array({', '.join(error_exprs)})))"
+                errors_sql = f"array_compact(flatten(array({', '.join(error_exprs)})))"
             else:
-                errors_sql = "array().cast('array<string>')"
+                errors_sql = "cast(array() as array<string>)"
 
             if warning_exprs:
-                warnings_sql = f"array_compact(array_flatten(array({', '.join(warning_exprs)})))"
+                warnings_sql = f"array_compact(flatten(array({', '.join(warning_exprs)})))"
             else:
-                warnings_sql = "array().cast('array<string>')"
+                warnings_sql = "cast(array() as array<string>)"
 
             current_df = (
                 current_df
