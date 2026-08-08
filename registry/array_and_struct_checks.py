@@ -1,5 +1,4 @@
 
-from yamlpipe.registry.columns_quality_registry import ColumnQualityRegistry
 
 class ArrayAndStructChecks:
 
@@ -7,6 +6,7 @@ class ArrayAndStructChecks:
 
     @classmethod
     def _extract_base_params(cls, check: dict, column: str):
+        from yamlpipe.registry.columns_quality_registry import ColumnQualityRegistry
         return ColumnQualityRegistry._extract_base_params(check, column)
 
     @classmethod
