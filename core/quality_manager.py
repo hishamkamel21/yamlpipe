@@ -1,5 +1,5 @@
 import re
-from typing import Dict, Any, Tuple, Union
+from typing import Dict, Any, Tuple, Union, List, Optional
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import expr
 from pyspark.storagelevel import StorageLevel
@@ -63,19 +63,19 @@ class QualityManager:
 
     def apply_checks(
         self,
-        batch_id: str = None,
+        batch_id: Any = None,
         action: str = "split",
         show_monitor_metrics: bool = False,
         persist_df: bool = True,
         storage_level: StorageLevel = StorageLevel.MEMORY_AND_DISK
-    ) -> Union[Tuple[DataFrame, DataFrame], DataFrame, Tuple[Any, ...]]:
+    ) -> Union[Tuple[Any, ...], DataFrame]:
         """
         Main Execution Engine. Runs Schema, Column, and Table quality rules against the DataFrame.
         """
         current_df = self.df
 
         # ---------------------------------------------------------------------
-        # 1. Apply Schema-Level Checks (via SchemaQualityRegistry)
+        # 1. Apply Schema-Level Checks
         # ---------------------------------------------------------------------
         if self.schema_checks:
             try:
@@ -111,7 +111,7 @@ class QualityManager:
             ) from e
 
         # ---------------------------------------------------------------------
-        # 3. Apply Table-Level Checks (Register Temp Views & Run SQL)
+        # 3. Apply Table-Level Checks
         # ---------------------------------------------------------------------
         table_expr_str = self.table_checks.get("expr", "")
         temp_views = self.table_checks.get("temp_views_to_create", [])
@@ -119,7 +119,6 @@ class QualityManager:
         if table_expr_str and table_expr_str.strip():
             spark = current_df.sparkSession
 
-            # Step 3a: Create external reference temporary views
             for view_meta in temp_views:
                 view_name = view_meta.get("view_name")
                 raw_ref_table = view_meta.get("table")
@@ -133,24 +132,19 @@ class QualityManager:
                     elif path:
                         spark.read.format(fmt).load(path).createOrReplaceTempView(view_name)
 
-            # Step 3b: Create local source temp view named 'tmp_src'
             current_df.createOrReplaceTempView("tmp_src")
 
-            # Step 3c: Execute compiled SQL expressions against 'tmp_src'
             try:
                 sql_query = f"SELECT *, {table_expr_str} FROM tmp_src"
                 current_df = spark.sql(sql_query)
-
-                # Extract and register output flag names
                 self._extract_and_register_table_flags(table_expr_str)
-
             except Exception as e:
                 raise RuntimeError(f"Table Quality evaluation failed: {str(e)}") from e
 
         self.final_df = current_df
 
         # ---------------------------------------------------------------------
-        # 4. Persistence Management (Serverless-Safe Fallback)
+        # 4. Persistence Management
         # ---------------------------------------------------------------------
         if persist_df:
             try:
@@ -160,42 +154,72 @@ class QualityManager:
                 pass
 
         # ---------------------------------------------------------------------
-        # 5. Observability Metrics Generation
-        # ---------------------------------------------------------------------
-        metrics = None
-        if show_monitor_metrics:
-            metrics = MonitorManager.generate_metrics(
-                df=self.final_df,
-                table_name=self.table_name,
-                flags=self.flags,
-                check_summary=self.check_summary,
-                batch_id=batch_id
-            )
-
-        # Helper internal function to flatten metrics unpack
-        def _unpack_metrics(m):
-            return m if isinstance(m, tuple) else (m,)
-
-        # ---------------------------------------------------------------------
-        # 6. Dataset Routing (Keep vs Split)
+        # 5. Route Output DataFrames & Parse Metrics
         # ---------------------------------------------------------------------
         if action.lower() == "keep":
-            if show_monitor_metrics:
-                return (self.final_df, *_unpack_metrics(metrics))
-            return self.final_df
-
-        valid_df, invalid_df = self.split_df(df=self.final_df)
+            data_outputs = (self.final_df,)
+        else:
+            valid_df, invalid_df = self.split_df(df=self.final_df)
+            data_outputs = (valid_df, invalid_df)
 
         if show_monitor_metrics:
-            return (valid_df, invalid_df, *_unpack_metrics(metrics))
+            metrics_outputs = self._generate_and_parse_metrics(batch_id=batch_id)
+            return data_outputs + tuple(metrics_outputs)
 
-        return valid_df, invalid_df
+        return data_outputs[0] if len(data_outputs) == 1 else data_outputs
+
+    def _generate_and_parse_metrics(self, batch_id: Any = None) -> List[DataFrame]:
+        """
+        Private Helper: Calls MonitorManager and dynamically extracts metrics DataFrames
+        in a strict order depending on check_summary state.
+        """
+        metrics_dict = MonitorManager.generate_metrics(
+            df=self.final_df,
+            table_name=self.table_name,
+            flags=self.flags,
+            check_summary=self.check_summary,
+            batch_id=batch_id
+        )
+
+        extracted_metrics = []
+
+        # 1. Schema Check Metrics
+        if self.check_summary.get("schema_checks_exist", False):
+            if "schema_summary" in metrics_dict:
+                extracted_metrics.append(metrics_dict["schema_summary"])
+            if "schema_monitor_details" in metrics_dict:
+                extracted_metrics.append(metrics_dict["schema_monitor_details"])
+
+        # 2. Data Summary Metrics
+        has_active_flags = len(self.flags) > 0
+        requires_data_scan = (
+            self.check_summary.get("columns_checks_exist", False)
+            or self.check_summary.get("table_checks_exist", False)
+            or has_active_flags
+        )
+
+        if requires_data_scan and "data_monitor_summary" in metrics_dict:
+            extracted_metrics.append(metrics_dict["data_monitor_summary"])
+
+        # 3. Column-Level Metrics
+        if self.check_summary.get("columns_checks_exist", False) and "per_column_metrics" in metrics_dict:
+            extracted_metrics.append(metrics_dict["per_column_metrics"])
+
+        # 4. Error-Type Metrics
+        has_error_type_scope = (
+            self.check_summary.get("table_checks_exist", False)
+            or self.check_summary.get("columns_checks_exist", False)
+        )
+        if has_error_type_scope and "per_error_type_metrics" in metrics_dict:
+            extracted_metrics.append(metrics_dict["per_error_type_metrics"])
+
+        return extracted_metrics
 
     def _extract_and_register_table_flags(self, table_expr_str: str):
         """
         Parses output column aliases from Table SQL expressions and registers flag metadata.
         """
-        aliases = re.findall(r"AS\s+[`]?([a-zA-Z0-9_]+)[`]?", table_expr_str, re.IGNORECASE) 
+        aliases = re.findall(r"AS\s+[`]?([a-zA-Z0-9_]+)[`]?", table_expr_str, re.IGNORECASE)
 
         for flag_name in aliases:
             is_freshness = "freshness" in flag_name.lower() or "lag" in flag_name.lower()
