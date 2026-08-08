@@ -1,6 +1,4 @@
-
 import logging
-import uuid
 from typing import Dict, Any, Tuple
 from yamlpipe.utility.helper import Helper
 
@@ -13,7 +11,7 @@ class TableQualityRegistry:
     # 1. DUPLICATE CHECK EXPR
     # -------------------------------------------------------------------------
     @staticmethod
-    def build_duplicate_expr(check: Dict[str, Any]) -> str:
+    def build_duplicate_expr(check: Dict[str, Any]) -> Tuple[str, bool, bool]:
         output_column = check.get("output_column", "is_duplicate")
         raw_keys = check.get("keys", [])
 
@@ -34,13 +32,17 @@ class TableQualityRegistry:
             cleaned_order = Helper.clean_multiline_sql(str(orderby_expr))
             order_by_clause = f"ORDER BY {cleaned_order} DESC"
 
-        return f"CASE WHEN ROW_NUMBER() OVER (PARTITION BY {partition_cols} {order_by_clause}) > 1 THEN 1 ELSE 0 END AS `{output_column}`"
+        expr = f"CASE WHEN ROW_NUMBER() OVER (PARTITION BY {partition_cols} {order_by_clause}) > 1 THEN 1 ELSE 0 END AS `{output_column}`"
+        on_split_keep = check.get("on_split_keep", False)
+        is_freshness = False
+
+        return expr, on_split_keep, is_freshness
 
     # -------------------------------------------------------------------------
     # 2. LOOKUP CHECK EXPR
     # -------------------------------------------------------------------------
     @classmethod
-    def build_lookup_expr(cls, check: Dict[str, Any], ref_view: str) -> str:
+    def build_lookup_expr(cls, check: Dict[str, Any], ref_view: str) -> Tuple[str, bool, bool]:
         output_column = check.get("output_column", "is_lookup_failed")
         join_keys = check.get("keys", check.get("join_keys", []))
 
@@ -56,17 +58,21 @@ class TableQualityRegistry:
         should_broadcast = check.get("broadcast", True)
         broadcast_hint = "/*+ BROADCAST(r) */" if should_broadcast else ""
 
-        return f"""CASE WHEN NOT EXISTS (
+        expr = f"""CASE WHEN NOT EXISTS (
             SELECT {broadcast_hint} 1 
             FROM {ref_view} r 
             WHERE {join_conditions} {filter_sql}
         ) THEN 1 ELSE 0 END AS `{output_column}`"""
+        on_split_keep = check.get("on_split_keep", False)
+        is_freshness = False
+
+        return expr, on_split_keep, is_freshness
 
     # -------------------------------------------------------------------------
     # 3. FOREIGN KEY CHECK EXPR
     # -------------------------------------------------------------------------
     @classmethod
-    def build_foreign_key_expr(cls, check: Dict[str, Any], ref_view: str) -> str:
+    def build_foreign_key_expr(cls, check: Dict[str, Any], ref_view: str) -> Tuple[str, bool, bool]:
         output_column = check.get("output_column", "is_fk_violation")
         fk_col = check.get("foreign_key")
         ref_cfg = check.get("ref", {})
@@ -85,17 +91,21 @@ class TableQualityRegistry:
         should_broadcast = ref_cfg.get("broadcast", True)
         broadcast_hint = "/*+ BROADCAST(r) */" if should_broadcast else ""
 
-        return f"""CASE WHEN `{cleaned_fk_col}` IS NOT NULL AND NOT EXISTS (
+        expr = f"""CASE WHEN `{cleaned_fk_col}` IS NOT NULL AND NOT EXISTS (
             SELECT {broadcast_hint} 1 
             FROM {ref_view} r 
             WHERE r.`{cleaned_ref_key}` = `{cleaned_fk_col}` {ref_filter_sql}
         ) THEN 1 ELSE 0 END AS `{output_column}`"""
+        on_split_keep = check.get("on_split_keep", False)
+        is_freshness = False
+
+        return expr, on_split_keep, is_freshness
 
     # -------------------------------------------------------------------------
     # 4. FRESHNESS CHECK EXPR
     # -------------------------------------------------------------------------
     @staticmethod
-    def build_freshness_expr(check: Dict[str, Any]) -> str:
+    def build_freshness_expr(check: Dict[str, Any]) -> Tuple[str, bool, bool]:
         output_column = check.get("output_column", "freshness_lag_seconds")
         
         ts_column = (
@@ -111,16 +121,18 @@ class TableQualityRegistry:
         ts_column_expr = Helper.clean_multiline_sql(str(ts_column))
 
         if unit == "max_timestamp":
-            return f"MAX({ts_column_expr}) OVER () AS `{output_column}`"
-        
-        ref_ts_sql = Helper.clean_multiline_sql(check["ref_timestamp"]) if check.get("ref_timestamp") else "CURRENT_TIMESTAMP()"
+            expr = f"MAX({ts_column_expr}) OVER () AS `{output_column}`"
+        else:
+            ref_ts_sql = Helper.clean_multiline_sql(check["ref_timestamp"]) if check.get("ref_timestamp") else "CURRENT_TIMESTAMP()"
 
-        divisor = 1.0
-        if unit == "hours":
-            divisor = 3600.0
-        elif unit == "days":
-            divisor = 86400.0
-        elif unit != "seconds":
-            raise ValueError(f"[Freshness Check Error] Unsupported freshness unit '{unit}'.")
+            divisor = 1.0
+            if unit == "hours":
+                divisor = 3600.0
+            elif unit == "days":
+                divisor = 86400.0
+            elif unit != "seconds":
+                raise ValueError(f"[Freshness Check Error] Unsupported freshness unit '{unit}'.")
 
-        return f"(UNIX_TIMESTAMP({ref_ts_sql}) - UNIX_TIMESTAMP(MAX({ts_column_expr}) OVER ())) / {divisor} AS `{output_column}`"
+            expr = f"(UNIX_TIMESTAMP({ref_ts_sql}) - UNIX_TIMESTAMP(MAX({ts_column_expr}) OVER ())) / {divisor} AS `{output_column}`"
+
+        return expr, True, True

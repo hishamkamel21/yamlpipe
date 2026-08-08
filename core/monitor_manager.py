@@ -150,6 +150,8 @@ class MonitorManager:
     ) -> DataFrame:
         """
         Aggregates data row counts, valid/invalid splits, errors, warnings, and table flags.
+        Handles freshness flags with MAX aggregation ending in '_value', and standard flags
+        with COUNT aggregation ending in '_count'.
         """
         agg_exprs = [
             F.count("*").alias("total_rows"),
@@ -159,16 +161,23 @@ class MonitorManager:
 
         for f in flags:
             flag_name = f["flag_name"]
-            agg_exprs.append(
-                F.sum(F.when(F.coalesce(F.col(flag_name), F.lit(0)) != 0, 1).otherwise(0)).alias(f"flag_{flag_name}_count")
-            )
+            is_freshness = f.get("is_freshness", False)
+
+            if is_freshness:
+                agg_exprs.append(
+                    F.max(F.col(flag_name)).alias(f"flag_{flag_name}_value")
+                )
+            else:
+                agg_exprs.append(
+                    F.sum(F.when(F.coalesce(F.col(flag_name), F.lit(0)) != 0, 1).otherwise(0)).alias(f"flag_{flag_name}_count")
+                )
 
         summary_df = df.agg(*agg_exprs)
 
-        # Build valid row condition considering both Errors array and flags
+        # Build valid row condition considering both Errors array and non-freshness flags
         invalid_conditions = [F.size(F.col("Errors")) > 0]
         for f in flags:
-            if not f.get("on_split_keep", False):
+            if not f.get("on_split_keep", False) and not f.get("is_freshness", False):
                 flag_name = f["flag_name"]
                 invalid_conditions.append(F.coalesce(F.col(flag_name), F.lit(0)) != 0)
 
@@ -178,20 +187,28 @@ class MonitorManager:
 
         invalid_rows_df = df.filter(invalid_expr).agg(F.count("*").alias("invalid_rows"))
 
+        # Select all generated base summary columns along with dynamic flag columns
+        dynamic_flag_cols = [
+            F.col(f"flag_{f['flag_name']}_value") if f.get("is_freshness", False) else F.col(f"flag_{f['flag_name']}_count")
+            for f in flags
+        ]
+
+        base_cols = [
+            F.lit(batch_id_val).alias("batch_id"),
+            F.lit(table_name).alias("table"),
+            F.col("total_rows"),
+            F.col("valid_rows"),
+            F.col("invalid_rows"),
+            F.col("valid_rate"),
+            F.col("rows_with_errors"),
+            F.col("rows_with_warnings")
+        ]
+
         return (
             summary_df.crossJoin(invalid_rows_df)
             .withColumn("valid_rows", F.col("total_rows") - F.col("invalid_rows"))
             .withColumn("valid_rate", F.round((F.col("valid_rows") / F.when(F.col("total_rows") == 0, 1).otherwise(F.col("total_rows"))) * 100, 2))
-            .select(
-                F.lit(batch_id_val).alias("batch_id"),
-                F.lit(table_name).alias("table"),
-                F.col("total_rows"),
-                F.col("valid_rows"),
-                F.col("invalid_rows"),
-                F.col("valid_rate"),
-                F.col("rows_with_errors"),
-                F.col("rows_with_warnings")
-            )
+            .select(*(base_cols + dynamic_flag_cols))
         )
 
     @staticmethod

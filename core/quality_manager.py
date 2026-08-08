@@ -45,7 +45,7 @@ class QualityManager:
         self.schema_checks = parsed_config.get("schema_checks", [])
         self.columns_checks = parsed_config.get("columns_checks", {"error_expr": [], "warn_expr": []})
         self.registered_error_suffixes = parsed_config.get("registered_error_suffixes", [])
-        self.table_checks = parsed_config.get("table_checks", {"expr": "", "temp_views_to_create": []})
+        self.table_checks = parsed_config.get("table_checks", {"checks": [], "temp_views_to_create": []})
 
         # Dynamic check availability summary
         self.check_summary = {
@@ -53,9 +53,7 @@ class QualityManager:
             "columns_checks_exist": bool(
                 self.columns_checks.get("error_expr") or self.columns_checks.get("warn_expr")
             ),
-            "table_checks_exist": bool(
-                self.table_checks.get("expr") and self.table_checks.get("expr").strip()
-            ),
+            "table_checks_exist": bool(self.table_checks.get("checks")),
         }
 
         # Internal state tracking
@@ -114,10 +112,10 @@ class QualityManager:
         # ---------------------------------------------------------------------
         # 3. Apply Table-Level Checks
         # ---------------------------------------------------------------------
-        table_expr_str = self.table_checks.get("expr", "")
+        checks_list = self.table_checks.get("checks", [])
         temp_views = self.table_checks.get("temp_views_to_create", [])
 
-        if table_expr_str and table_expr_str.strip():
+        if checks_list:
             spark = current_df.sparkSession
 
             for view_meta in temp_views:
@@ -135,10 +133,13 @@ class QualityManager:
 
             current_df.createOrReplaceTempView("tmp_src")
 
+            # Extract combined SQL expression and register flags from structured item list
+            table_expr_str = ", ".join([chk["expr"] for chk in checks_list if chk.get("expr")])
+            self._register_table_flags_from_checks(checks_list)
+
             try:
                 sql_query = f"SELECT *, {table_expr_str} FROM tmp_src"
                 current_df = spark.sql(sql_query)
-                self._extract_and_register_table_flags(table_expr_str)
             except Exception as e:
                 raise RuntimeError(f"Table Quality evaluation failed: {str(e)}") from e
 
@@ -217,19 +218,21 @@ class QualityManager:
 
         return extracted_metrics
 
-    def _extract_and_register_table_flags(self, table_expr_str: str):
+    def _register_table_flags_from_checks(self, checks_list: List[Dict[str, Any]]):
         """
-        Parses output column aliases from Table SQL expressions and registers flag metadata.
+        Extracts column alias from each check expression and attaches metadata directly.
         """
-        aliases = re.findall(r"AS\s+[`]?([a-zA-Z0-9_]+)[`]?", table_expr_str, re.IGNORECASE)
-
-        for flag_name in aliases:
-            is_freshness = "freshness" in flag_name.lower() or "lag" in flag_name.lower()
-            self.flags.append({
-                "flag_name": flag_name,
-                "on_split_keep": is_freshness,
-                "is_freshness": is_freshness
-            })
+        for check in checks_list:
+            expr_str = check.get("expr", "")
+            match = re.search(r"AS\s+[`]?([a-zA-Z0-9_]+)[`]?$", expr_str, re.IGNORECASE)
+            
+            if match:
+                flag_name = match.group(1)
+                self.flags.append({
+                    "flag_name": flag_name,
+                    "on_split_keep": check.get("on_split_keep", False),
+                    "is_freshness": check.get("is_freshness", False)
+                })
 
     def split_df(self, df: DataFrame) -> Tuple[DataFrame, DataFrame]:
         """
