@@ -2,7 +2,7 @@ import logging
 import re
 from typing import Dict, Any, Tuple, Union
 from pyspark.sql import DataFrame
-from pyspark.sql.functions import expr, col, size
+from pyspark.sql.functions import expr
 from pyspark.storagelevel import StorageLevel
 
 from yamlpipe.registry.schema_checks_registry import SchemaQualityRegistry
@@ -22,12 +22,14 @@ class QualityManager:
         :param df: Input PySpark DataFrame to run quality rules against.
         """
         if not isinstance(parsed_config, dict):
+            logger.error("QualityManager initialization failed: 'parsed_config' is not a dictionary.")
             raise TypeError(
                 f"[QualityManager Init Error] 'parsed_config' must be a dictionary, "
                 f"got '{type(parsed_config).__name__}'."
             )
 
         if not isinstance(df, DataFrame):
+            logger.error("QualityManager initialization failed: 'df' is not a PySpark DataFrame.")
             raise TypeError(
                 f"[QualityManager Init Error] 'df' must be a valid PySpark DataFrame, "
                 f"got '{type(df).__name__}'."
@@ -49,9 +51,25 @@ class QualityManager:
         self.columns_checks = parsed_config.get("columns_checks", {"error_expr": [], "warn_expr": []})
         self.table_checks = parsed_config.get("table_checks", {"expr": "", "temp_views_to_create": []})
 
+        # Dynamic check availability summary
+        self.check_summary = {
+            "schema_checks_exist": bool(self.schema_checks),
+            "columns_checks_exist": bool(
+                self.columns_checks.get("error_expr") or self.columns_checks.get("warn_expr")
+            ),
+            "table_checks_exist": bool(
+                self.table_checks.get("expr") and self.table_checks.get("expr").strip()
+            ),
+        }
+
         # Internal state tracking
         self.flags = []
         self.final_df = None
+
+        logger.info(
+            f"QualityManager initialized for table '{self.table_name}'. "
+            f"Summary: {self.check_summary}"
+        )
 
     def apply_checks(
         self,
@@ -64,17 +82,18 @@ class QualityManager:
         """
         Main Execution Engine. Runs Schema, Column, and Table quality rules against the DataFrame.
         """
+        logger.info(f"Starting quality checks execution for table '{self.table_name}' (batch_id: {batch_id}).")
         current_df = self.df
 
         # ---------------------------------------------------------------------
         # 1. Apply Schema-Level Checks (via SchemaQualityRegistry)
         # ---------------------------------------------------------------------
         if self.schema_checks:
+            logger.info(f"Applying schema checks for '{self.table_name}'.")
             try:
                 current_df = SchemaQualityRegistry.apply_schema_checks(current_df, self.schema_checks)
-                logger.info("Successfully applied schema checks.")
             except Exception as e:
-                logger.error(f"Failed during schema checks execution: {str(e)}")
+                logger.exception(f"Schema Quality evaluation failed for '{self.table_name}'.")
                 raise RuntimeError(f"Schema Quality evaluation failed: {str(e)}") from e
 
         # ---------------------------------------------------------------------
@@ -82,6 +101,11 @@ class QualityManager:
         # ---------------------------------------------------------------------
         error_exprs = self.columns_checks.get("error_expr", [])
         warning_exprs = self.columns_checks.get("warn_expr", [])
+
+        logger.info(
+            f"Applying column checks for '{self.table_name}' "
+            f"({len(error_exprs)} errors, {len(warning_exprs)} warnings)."
+        )
 
         try:
             if error_exprs:
@@ -100,7 +124,7 @@ class QualityManager:
                 .withColumn("Warnings", expr(warnings_sql))
             )
         except Exception as e:
-            logger.error(f"Failed to compile column check expressions in PySpark: {str(e)}")
+            logger.exception(f"Column Quality evaluation failed for '{self.table_name}'.")
             raise RuntimeError(
                 f"Column Quality evaluation failed. Check SQL expressions. Error: {str(e)}"
             ) from e
@@ -112,9 +136,10 @@ class QualityManager:
         temp_views = self.table_checks.get("temp_views_to_create", [])
 
         if table_expr_str and table_expr_str.strip():
+            logger.info(f"Applying table checks for '{self.table_name}'.")
             spark = current_df.sparkSession
 
-            # Step 3a: Create external reference temporary views (Lookups / Foreign Keys)
+            # Step 3a: Create external reference temporary views
             for view_meta in temp_views:
                 view_name = view_meta.get("view_name")
                 raw_ref_table = view_meta.get("table")
@@ -123,15 +148,14 @@ class QualityManager:
 
                 if view_name:
                     if raw_ref_table:
-                        # Support catalog.schema.table syntax via Helper.parse_table_name
                         cleaned_ref_table = Helper.parse_table_name(raw_ref_table)
-                        logger.info(f"Registering temp view '{view_name}' from catalog table '{cleaned_ref_table}'.")
+                        logger.info(f"Registering temp view '{view_name}' from table '{cleaned_ref_table}'.")
                         spark.read.table(cleaned_ref_table).createOrReplaceTempView(view_name)
                     elif path:
-                        logger.info(f"Registering temp view '{view_name}' from path '{path}'.")
+                        logger.info(f"Registering temp view '{view_name}' from path '{path}' ({fmt}).")
                         spark.read.format(fmt).load(path).createOrReplaceTempView(view_name)
 
-            # Step 3b: Create local source temp view named 'tmp_src' required by Registry SQL expressions
+            # Step 3b: Create local source temp view named 'tmp_src'
             current_df.createOrReplaceTempView("tmp_src")
 
             # Step 3c: Execute compiled SQL expressions against 'tmp_src'
@@ -139,42 +163,53 @@ class QualityManager:
                 sql_query = f"SELECT *, {table_expr_str} FROM tmp_src"
                 current_df = spark.sql(sql_query)
 
-                # Extract and register output flag names for monitoring and splitting logic
+                # Extract and register output flag names
                 self._extract_and_register_table_flags(table_expr_str)
 
             except Exception as e:
-                logger.error(f"Failed to execute table_checks query: {str(e)}")
+                logger.exception(f"Table Quality evaluation failed for '{self.table_name}'.")
                 raise RuntimeError(f"Table Quality evaluation failed: {str(e)}") from e
 
         self.final_df = current_df
 
         # ---------------------------------------------------------------------
-        # 4. Persistence Management
+        # 4. Persistence Management (Serverless-Safe Fallback)
         # ---------------------------------------------------------------------
-        if persist_df and not self.final_df.is_cached:
-            self.final_df.persist(storage_level)
-            logger.info(f"Persisted evaluated DataFrame for table '{self.table_name}' using {storage_level}")
+        if persist_df:
+            try:
+                if not self.final_df.is_cached:
+                    logger.info(f"Persisting evaluated DataFrame for '{self.table_name}' with storage level {storage_level}.")
+                    self.final_df.persist(storage_level)
+            except Exception as e:
+                logger.warning(
+                    f"Unable to persist DataFrame for '{self.table_name}' "
+                    f"(likely Databricks Serverless / Spark Connect context): {str(e)}"
+                )
 
         # ---------------------------------------------------------------------
         # 5. Observability Metrics Generation
         # ---------------------------------------------------------------------
         metrics = None
         if show_monitor_metrics:
+            logger.info(f"Generating observability metrics for '{self.table_name}'.")
             metrics = MonitorManager.generate_metrics(
                 df=self.final_df,
                 table_name=self.table_name,
-                batch_id=batch_id,
-                flags=self.flags
+                flags=self.flags,
+                check_summary=self.check_summary,
+                batch_id=batch_id
             )
 
         # ---------------------------------------------------------------------
         # 6. Dataset Routing (Keep vs Split)
         # ---------------------------------------------------------------------
         if action.lower() == "keep":
+            logger.info(f"Action 'keep' specified for '{self.table_name}'. Returning un-partitioned DataFrame.")
             if show_monitor_metrics:
                 return self.final_df, metrics
             return self.final_df
 
+        logger.info(f"Splitting DataFrame for '{self.table_name}' into valid and invalid sets.")
         valid_df, invalid_df = self.split_df(df=self.final_df)
 
         if show_monitor_metrics:
@@ -195,6 +230,7 @@ class QualityManager:
                 "on_split_keep": is_freshness,
                 "is_freshness": is_freshness
             })
+        logger.debug(f"Extracted table flags for '{self.table_name}': {self.flags}")
 
     def split_df(self, df: DataFrame) -> Tuple[DataFrame, DataFrame]:
         """
@@ -213,19 +249,28 @@ class QualityManager:
             valid_expr = " AND ".join(valid_conditions)
             invalid_expr = " OR ".join(invalid_conditions)
 
+            logger.debug(f"Split filter [valid] for '{self.table_name}': {valid_expr}")
+            logger.debug(f"Split filter [invalid] for '{self.table_name}': {invalid_expr}")
+
             valid_df = df.filter(valid_expr)
             invalid_df = df.filter(invalid_expr)
 
             return valid_df, invalid_df
 
         except Exception as e:
-            logger.error(f"Failed to split DataFrame: {str(e)}")
+            logger.exception(f"DataFrame split operation failed for '{self.table_name}'.")
             raise RuntimeError(f"DataFrame split operation failed: {str(e)}") from e
 
     def unpersist(self):
         """
         Safely removes the cached evaluated DataFrame from Spark storage.
         """
-        if self.final_df is not None and self.final_df.is_cached:
-            self.final_df.unpersist()
-            logger.info(f"Successfully unpersisted evaluated DataFrame for table '{self.table_name}'. Memory freed.")
+        try:
+            if self.final_df is not None and self.final_df.is_cached:
+                logger.info(f"Unpersisting evaluated DataFrame for '{self.table_name}'.")
+                self.final_df.unpersist()
+        except Exception as e:
+            logger.warning(
+                f"Unable to unpersist DataFrame for '{self.table_name}' "
+                f"(likely Databricks Serverless / Spark Connect context): {str(e)}"
+            )
