@@ -2,7 +2,7 @@ import os
 import yaml
 import logging
 from typing import Optional, Dict, Any
-from yamlpipe.utility.cache_manager import CacheManager
+from yamlpipe.core.cache_manager import CacheManager
 
 logger = logging.getLogger("Getter")
 
