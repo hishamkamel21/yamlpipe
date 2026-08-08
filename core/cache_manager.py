@@ -5,8 +5,8 @@ import yaml
 import logging
 from typing import Dict, Any, Tuple
 
-from yamlpipe.parsers.transformation_parser import TransformationParser
-from yamlpipe.parsers.quality_checks_parser import QualityChecksParser
+from yamlpipe.parser.transformation_parser import TransformationParser
+from yamlpipe.parser.quality_checks_parser import QualityChecksParser
 
 logger = logging.getLogger("CacheManager")
 

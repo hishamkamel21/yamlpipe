@@ -5,7 +5,7 @@ from pyspark.sql import DataFrame
 from pyspark.sql.functions import expr, col, size
 from pyspark.storagelevel import StorageLevel
 
-from yamlpipe.registries.schema_quality_registry import SchemaQualityRegistry
+from yamlpipe.registry.schema_checks_registry import SchemaQualityRegistry
 from yamlpipe.core.monitor_manager import MonitorManager
 from yamlpipe.utility.helper import Helper
 
