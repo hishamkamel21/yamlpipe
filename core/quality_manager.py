@@ -90,23 +90,24 @@ class QualityManager:
 
         try:
             if error_exprs:
-                errors_sql = f"array_compact(flatten(array({', '.join(error_exprs)})))"
+                    errors_sql = f"filter(flatten(array({', '.join(error_exprs)})), x -> x is not null)"
             else:
-                errors_sql = "cast(array() as array<string>)"
+                    # إنشاء ARRAY<STRING> فارغة بدون استخدام cast(... as array<string>)
+                    errors_sql = "filter(array(cast(null as string)), x -> x is not null)"
 
             if warning_exprs:
-                warnings_sql = f"array_compact(flatten(array({', '.join(warning_exprs)})))"
+                warnings_sql = f"filter(flatten(array({', '.join(warning_exprs)})), x -> x is not null)"
             else:
-                warnings_sql = "cast(array() as array<string>)"
+                warnings_sql = "filter(array(cast(null as string)), x -> x is not null)"
 
             current_df = (
-                current_df
-                .withColumn("Errors", expr(errors_sql))
-                .withColumn("Warnings", expr(warnings_sql))
+                    current_df
+                    .withColumn("Errors", expr(errors_sql))
+                    .withColumn("Warnings", expr(warnings_sql))
             )
         except Exception as e:
             raise RuntimeError(
-                f"Column Quality evaluation failed. Check SQL expressions. Error: {str(e)}"
+            f"Column Quality evaluation failed. Check SQL expressions. Error: {str(e)}"
             ) from e
 
         # ---------------------------------------------------------------------
