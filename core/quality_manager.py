@@ -89,27 +89,31 @@ class QualityManager:
         warning_exprs = self.columns_checks.get("warn_expr", [])
 
         try:
-            if error_exprs:
-                    errors_sql = f"filter(flatten(array({', '.join(error_exprs)})), x -> x is not null)"
-            else:
-                    # إنشاء ARRAY<STRING> فارغة بدون استخدام cast(... as array<string>)
-                    errors_sql = "filter(array(cast(null as string)), x -> x is not null)"
+            
+    # 1. تنظيف أي آثار قديمة لـ array<string> لو كانت جاية من الـ JSON
+            clean_error_exprs = [e.replace("array<string>", "array(string(null))") for e in error_exprs]
+            clean_warning_exprs = [e.replace("array<string>", "array(string(null))") for e in warning_exprs]
 
-            if warning_exprs:
-                warnings_sql = f"filter(flatten(array({', '.join(warning_exprs)})), x -> x is not null)"
+            # 2. بناء الـ SQL باستخدام array_remove بدلاً من filter أو array_compact
+            if clean_error_exprs:
+                errors_sql = f"array_remove(flatten(array({', '.join(clean_error_exprs)})), null)"
             else:
-                warnings_sql = "filter(array(cast(null as string)), x -> x is not null)"
+                errors_sql = "array_remove(array(string(null)), string(null))"
+
+            if clean_warning_exprs:
+                warnings_sql = f"array_remove(flatten(array({', '.join(clean_warning_exprs)})), null)"
+            else:
+                warnings_sql = "array_remove(array(string(null)), string(null))"
 
             current_df = (
-                    current_df
-                    .withColumn("Errors", expr(errors_sql))
-                    .withColumn("Warnings", expr(warnings_sql))
+                current_df
+                .withColumn("Errors", expr(errors_sql))
+                .withColumn("Warnings", expr(warnings_sql))
             )
         except Exception as e:
             raise RuntimeError(
             f"Column Quality evaluation failed. Check SQL expressions. Error: {str(e)}"
             ) from e
-
         # ---------------------------------------------------------------------
         # 3. Apply Table-Level Checks
         # ---------------------------------------------------------------------

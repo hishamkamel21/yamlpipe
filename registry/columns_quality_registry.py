@@ -8,8 +8,8 @@ class ColumnQualityRegistry:
 
     ALLOWED_OPERATORS = {op.value for op in AllowedOperator}
     TYPE_MAPPING = {member.name.lower(): member.value for member in DataTypeAlias}
-    EMPTY_ARRAY_SQL = "filter(array(cast(null as string)), x -> x is not null)"
-    
+    EMPTY_ARRAY_SQL = "array_remove(array(string(null)), string(null))" 
+        
     @classmethod
     def router(cls, check: dict, column: str):
         if not isinstance(check, dict) or ("check_type" not in check and "type" not in check):
