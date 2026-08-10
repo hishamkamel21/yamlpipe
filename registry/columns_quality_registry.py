@@ -8,7 +8,7 @@ class ColumnQualityRegistry:
 
     ALLOWED_OPERATORS = {op.value for op in AllowedOperator}
     TYPE_MAPPING = {member.name.lower(): member.value for member in DataTypeAlias}
-    EMPTY_ARRAY_SQL = "array_remove(array(string(null)), string(null))" 
+    EMPTY_ARRAY_SQL = "array_except(array(cast(null as string)), array(cast(null as string)))"
         
     @classmethod
     def router(cls, check: dict, column: str):

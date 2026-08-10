@@ -89,21 +89,18 @@ class QualityManager:
         warning_exprs = self.columns_checks.get("warn_expr", [])
 
         try:
-            
-    # 1. تنظيف أي آثار قديمة لـ array<string> لو كانت جاية من الـ JSON
-            clean_error_exprs = [e.replace("array<string>", "array(string(null))") for e in error_exprs]
-            clean_warning_exprs = [e.replace("array<string>", "array(string(null))") for e in warning_exprs]
+            # استخدام array_except لإنشاء مصفوفة فارغة ARRAY<STRING> ناتجة عن [] وليس NULL
+            empty_array_sql = "array_except(array(cast(null as string)), array(cast(null as string)))"
 
-            # 2. بناء الـ SQL باستخدام array_remove بدلاً من filter أو array_compact
-            if clean_error_exprs:
-                errors_sql = f"array_remove(flatten(array({', '.join(clean_error_exprs)})), null)"
+            if error_exprs:
+                errors_sql = f"array_compact(flatten(array({', '.join(error_exprs)})))"
             else:
-                errors_sql = "array_remove(array(string(null)), string(null))"
+                errors_sql = empty_array_sql
 
-            if clean_warning_exprs:
-                warnings_sql = f"array_remove(flatten(array({', '.join(clean_warning_exprs)})), null)"
+            if warning_exprs:
+                warnings_sql = f"array_compact(flatten(array({', '.join(warning_exprs)})))"
             else:
-                warnings_sql = "array_remove(array(string(null)), string(null))"
+                warnings_sql = empty_array_sql
 
             current_df = (
                 current_df
@@ -112,8 +109,9 @@ class QualityManager:
             )
         except Exception as e:
             raise RuntimeError(
-            f"Column Quality evaluation failed. Check SQL expressions. Error: {str(e)}"
+                f"Column Quality evaluation failed. Check SQL expressions. Error: {str(e)}"
             ) from e
+
         # ---------------------------------------------------------------------
         # 3. Apply Table-Level Checks
         # ---------------------------------------------------------------------
