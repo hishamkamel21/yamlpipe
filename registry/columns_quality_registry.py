@@ -8,7 +8,7 @@ class ColumnQualityRegistry:
 
     ALLOWED_OPERATORS = {op.value for op in AllowedOperator}
     TYPE_MAPPING = {member.name.lower(): member.value for member in DataTypeAlias}
-    EMPTY_ARRAY_SQL = "CAST(array() AS ARRAY<STRING>)"
+    EMPTY_ARRAY_SQL = "array()"
 
     @classmethod
     def router(cls, check: dict, column: str):
