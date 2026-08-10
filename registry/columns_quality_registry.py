@@ -284,3 +284,5 @@ class ColumnQualityRegistry:
         return sql, severity, error_suffix
 
 
+
+
