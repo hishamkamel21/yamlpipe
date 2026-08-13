@@ -140,7 +140,7 @@ class StructQualityChecks:
             sql = f"""
             CASE
                 WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({condition})
-                THEN array('{column}_{error_suffix}')
+                THEN array('{field_expr}_{error_suffix}')
                 ELSE {cls.EMPTY_ARRAY_SQL}
             END
             """
@@ -211,7 +211,7 @@ class StructQualityChecks:
             sql = f"""
             CASE
                 WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({condition})
-                THEN array('{column}_{error_suffix}')
+                THEN array('{field_expr}_{error_suffix}')
                 ELSE {cls.EMPTY_ARRAY_SQL}
             END
             """
