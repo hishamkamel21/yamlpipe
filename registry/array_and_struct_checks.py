@@ -26,12 +26,9 @@ class ArrayAndStructChecks:
             "arr_values_regex": ArrayQualityChecks.values_regex_check,
             "arr_regex": ArrayQualityChecks.values_regex_check,
             "arr_regex_match":ArrayQualityChecks.values_regex_check,
-            "values_regex": ArrayQualityChecks.values_regex_check,
-            "values_regex_match": ArrayQualityChecks.values_regex_check,
 
             "array_values_range": ArrayQualityChecks.values_range_check,
             "arr_values_range": ArrayQualityChecks.values_range_check,
-            "values_range": ArrayQualityChecks.values_range_check,
 
             "array_length": ArrayQualityChecks.length_check,
             "array_min_length": ArrayQualityChecks.length_check,

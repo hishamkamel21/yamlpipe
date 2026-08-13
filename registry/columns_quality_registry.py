@@ -18,7 +18,7 @@ class ColumnQualityRegistry:
         check_type = check.get("check_type", check.get("type", None))
 
         prefix = check_type.split("_")[0]
-        if prefix in ("array", "struct","arr","fields","feilds","field","feild","value","values","distinct"):
+        if prefix in ("array", "struct","arr","fields","feilds","field","feild","distinct"):
             return ArrayAndStructChecks.router(check, column)
 
         dispatch = {
