@@ -14,7 +14,6 @@ class MonitorManager:
         if not error_suffixes:
             return r"^(.*?)_([A-Z0-9_]+_ERROR)$"
 
-        # Sort descending by length to ensure longer rules match before shorter tokens
         sorted_suffixes = sorted(list(error_suffixes), key=len, reverse=True)
         suffix_or_pattern = "|".join(sorted_suffixes)
 
@@ -59,7 +58,6 @@ class MonitorManager:
             exploded_errors = None
             exploded_warnings = None
 
-            # Generate dynamic regex pattern using captured error suffixes
             rules_regex_pattern = cls.build_rules_regex_pattern(error_suffixes)
 
             if column_checks:
@@ -89,6 +87,7 @@ class MonitorManager:
     ) -> DataFrame:
         """
         Builds the high-level schema compliance summary metric.
+        Includes batch_id, created_at, creation_date, and table metadata.
         """
         return (
             df.limit(1)
@@ -96,9 +95,12 @@ class MonitorManager:
                 F.lit(batch_id_val).alias("batch_id"),
                 F.lit(table_name).alias("table"),
                 F.col("schema_monitor.status").alias("schema_status"),
-                F.size(F.col("schema_monitor.missing_columns")).alias("missing_columns_count"),
-                F.size(F.col("schema_monitor.unexpected_columns")).alias("unexpected_columns_count"),
-                F.size(F.col("schema_monitor.mismatched_types")).alias("mismatched_types_count"),
+                F.size(F.col("schema_monitor.required_missing")).alias("required_missing_count"),
+                F.size(F.col("schema_monitor.type_mismatch")).alias("type_mismatch_count"),
+                F.size(F.col("schema_monitor.no_duplicate_columns.columns")).alias("duplicate_columns_count"),
+                F.size(F.col("schema_monitor.forbidden_exist")).alias("forbidden_exist_count"),
+                F.current_timestamp().alias("created_at"),
+                F.current_date().alias("creation_date")
             )
         )
 
@@ -107,52 +109,67 @@ class MonitorManager:
         df: DataFrame, table_name: str, batch_id_val=None
     ) -> DataFrame:
         """
-        Builds itemized breakdown of missing, unexpected, and type-mismatched columns.
+        Builds itemized breakdown of missing, mismatch, duplicate, and forbidden columns.
+        Includes created_at and creation_date metadata columns.
         """
-        missing_df = df.limit(1).select(
-            F.explode_outer(F.col("schema_monitor.missing_columns")).alias("missing")
+        req_missing_df = df.limit(1).select(
+            F.explode_outer(F.col("schema_monitor.required_missing")).alias("col_name")
         ).select(
             F.lit(batch_id_val).alias("batch_id"),
             F.lit(table_name).alias("table"),
-            F.lit("MISSING_COLUMN").alias("issue_type"),
-            F.col("missing.column").alias("column_name"),
-            F.col("missing.expected_type").alias("expected_type"),
-            F.lit(None).cast("string").alias("actual_type")
-        ).filter(F.col("column_name").isNotNull())
-
-        unexpected_df = df.limit(1).select(
-            F.explode_outer(F.col("schema_monitor.unexpected_columns")).alias("unexpected")
-        ).select(
-            F.lit(batch_id_val).alias("batch_id"),
-            F.lit(table_name).alias("table"),
-            F.lit("UNEXPECTED_COLUMN").alias("issue_type"),
-            F.col("unexpected.column").alias("column_name"),
+            F.lit("REQUIRED_MISSING").alias("issue_type"),
+            F.col("col_name").alias("column_name"),
             F.lit(None).cast("string").alias("expected_type"),
-            F.col("unexpected.actual_type").alias("actual_type")
+            F.lit(None).cast("string").alias("actual_type"),
+            F.current_timestamp().alias("created_at"),
+            F.current_date().alias("creation_date")
         ).filter(F.col("column_name").isNotNull())
 
         mismatched_df = df.limit(1).select(
-            F.explode_outer(F.col("schema_monitor.mismatched_types")).alias("mismatched")
+            F.explode_outer(F.col("schema_monitor.type_mismatch")).alias("mismatched")
         ).select(
             F.lit(batch_id_val).alias("batch_id"),
             F.lit(table_name).alias("table"),
             F.lit("TYPE_MISMATCH").alias("issue_type"),
             F.col("mismatched.column").alias("column_name"),
             F.col("mismatched.expected_type").alias("expected_type"),
-            F.col("mismatched.actual_type").alias("actual_type")
+            F.col("mismatched.actual_type").alias("actual_type"),
+            F.current_timestamp().alias("created_at"),
+            F.current_date().alias("creation_date")
         ).filter(F.col("column_name").isNotNull())
 
-        return missing_df.union(unexpected_df).union(mismatched_df)
+        duplicates_df = df.limit(1).select(
+            F.explode_outer(F.col("schema_monitor.no_duplicate_columns.columns")).alias("col_name")
+        ).select(
+            F.lit(batch_id_val).alias("batch_id"),
+            F.lit(table_name).alias("table"),
+            F.lit("DUPLICATE_COLUMN").alias("issue_type"),
+            F.col("col_name").alias("column_name"),
+            F.lit(None).cast("string").alias("expected_type"),
+            F.lit(None).cast("string").alias("actual_type"),
+            F.current_timestamp().alias("created_at"),
+            F.current_date().alias("creation_date")
+        ).filter(F.col("column_name").isNotNull())
+
+        forbidden_df = df.limit(1).select(
+            F.explode_outer(F.col("schema_monitor.forbidden_exist")).alias("col_name")
+        ).select(
+            F.lit(batch_id_val).alias("batch_id"),
+            F.lit(table_name).alias("table"),
+            F.lit("FORBIDDEN_EXIST").alias("issue_type"),
+            F.col("col_name").alias("column_name"),
+            F.lit(None).cast("string").alias("expected_type"),
+            F.lit(None).cast("string").alias("actual_type"),
+            F.current_timestamp().alias("created_at"),
+            F.current_date().alias("creation_date")
+        ).filter(F.col("column_name").isNotNull())
+
+        return req_missing_df.union(mismatched_df).union(duplicates_df).union(forbidden_df)
 
     @classmethod
     def _build_data_monitor_summary(
         cls, df: DataFrame, table_name: str, flags: List[dict], batch_id_val=None
     ) -> DataFrame:
-        """
-        Aggregates data row counts, valid/invalid splits, errors, warnings, and table flags.
-        Handles freshness flags with MAX aggregation ending in '_value', and standard flags
-        with COUNT aggregation ending in '_count'.
-        """
         agg_exprs = [
             F.count("*").alias("total_rows"),
             F.sum(F.when(F.size(F.col("Errors")) > 0, 1).otherwise(0)).alias("rows_with_errors"),
@@ -174,7 +191,6 @@ class MonitorManager:
 
         summary_df = df.agg(*agg_exprs)
 
-        # Build valid row condition considering both Errors array and non-freshness flags
         invalid_conditions = [F.size(F.col("Errors")) > 0]
         for f in flags:
             if not f.get("on_split_keep", False) and not f.get("is_freshness", False):
@@ -187,7 +203,6 @@ class MonitorManager:
 
         invalid_rows_df = df.filter(invalid_expr).agg(F.count("*").alias("invalid_rows"))
 
-        # Select all generated base summary columns along with dynamic flag columns
         dynamic_flag_cols = [
             F.col(f"flag_{f['flag_name']}_value") if f.get("is_freshness", False) else F.col(f"flag_{f['flag_name']}_count")
             for f in flags
@@ -204,11 +219,16 @@ class MonitorManager:
             F.col("rows_with_warnings")
         ]
 
+        meta_cols = [
+            F.current_timestamp().alias("created_at"),
+            F.current_date().alias("creation_date")
+        ]
+
         return (
             summary_df.crossJoin(invalid_rows_df)
             .withColumn("valid_rows", F.col("total_rows") - F.col("invalid_rows"))
             .withColumn("valid_rate", F.round((F.col("valid_rows") / F.when(F.col("total_rows") == 0, 1).otherwise(F.col("total_rows"))) * 100, 2))
-            .select(*(base_cols + dynamic_flag_cols))
+            .select(*(base_cols + dynamic_flag_cols + meta_cols))
         )
 
     @staticmethod
@@ -243,7 +263,7 @@ class MonitorManager:
             streams.append(exploded_warnings)
 
         if not streams:
-            empty_schema = "batch_id string, table string, column string, error_type string, severity string, error_count long, error_rate double"
+            empty_schema = "batch_id string, table string, column string, error_type string, severity string, error_count long, error_rate double, created_at timestamp, creation_date date"
             return data_summary_df.sparkSession.createDataFrame([], empty_schema)
 
         combined_column_rules = streams[0]
@@ -258,7 +278,6 @@ class MonitorManager:
             combined_column_rules
             .withColumn("column", F.regexp_extract(F.col("raw_rule"), rules_regex_pattern, 1))
             .withColumn("rule_type", F.regexp_extract(F.col("raw_rule"), rules_regex_pattern, 2))
-            # Fallback if pattern matching fails
             .withColumn("column", F.when(F.col("column") == "", F.element_at(F.split(F.col("raw_rule"), "_"), 1)).otherwise(F.col("column")))
             .withColumn("rule_type", F.when(F.col("rule_type") == "", F.element_at(F.split(F.col("raw_rule"), "_"), -1)).otherwise(F.col("rule_type")))
             .groupBy("column", "rule_type", "severity")
@@ -272,7 +291,9 @@ class MonitorManager:
                 F.col("rule_type").alias("error_type"),
                 F.col("severity"),
                 F.col("error_count"),
-                F.col("error_rate")
+                F.col("error_rate"),
+                F.current_timestamp().alias("created_at"),
+                F.current_date().alias("creation_date")
             )
         )
 
@@ -360,6 +381,8 @@ class MonitorManager:
                 F.col("error_type"),
                 F.col("impact_category"),
                 F.col("number_of_violations"),
-                F.col("error_rate")
+                F.col("error_rate"),
+                F.current_timestamp().alias("created_at"),
+                F.current_date().alias("creation_date")
             )
         )
