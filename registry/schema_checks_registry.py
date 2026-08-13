@@ -66,7 +66,7 @@ class SchemaQualityRegistry:
             except Exception as e:
                 raise RuntimeError(f"Schema compilation failed for rule: {check}") from e
 
-        # تصحيح صياغة SQL لإنشاء Empty Arrays مع Cast صريح مقبول في Spark SQL Parser
+        # Standardizing default fallback expressions
         default_fields = {
             "required_missing": "CAST(ARRAY() AS ARRAY<STRING>)",
             "type_mismatch": "CAST(ARRAY() AS ARRAY<STRUCT<column:STRING, expected_type:STRING, actual_type:STRING>>)",
@@ -78,12 +78,24 @@ class SchemaQualityRegistry:
             if key not in struct_fields:
                 struct_fields[key] = default_expr
 
-        # Build single named struct expression
-        struct_args = []
-        for key in ["required_missing", "type_mismatch", "no_duplicate_columns", "forbidden_exist"]:
-            struct_args.append(f"{struct_fields[key]} AS {key}")
+        # Calculate overall status dynamically
+        status_expr = (
+            f"CASE WHEN SIZE({struct_fields['required_missing']}) = 0 "
+            f"AND SIZE({struct_fields['type_mismatch']}) = 0 "
+            f"AND {struct_fields['no_duplicate_columns']}.condition = true "
+            f"AND SIZE({struct_fields['forbidden_exist']}) = 0 "
+            f"THEN 'PASSED' ELSE 'FAILED' END"
+        )
 
-        full_struct_expr = f"named_struct('required_missing', {struct_fields['required_missing']}, 'type_mismatch', {struct_fields['type_mismatch']}, 'no_duplicate_columns', {struct_fields['no_duplicate_columns']}, 'forbidden_exist', {struct_fields['forbidden_exist']})"
+        full_struct_expr = (
+            f"NAMED_STRUCT("
+            f"'status', {status_expr}, "
+            f"'required_missing', {struct_fields['required_missing']}, "
+            f"'type_mismatch', {struct_fields['type_mismatch']}, "
+            f"'no_duplicate_columns', {struct_fields['no_duplicate_columns']}, "
+            f"'forbidden_exist', {struct_fields['forbidden_exist']}"
+            f")"
+        )
 
         return df.withColumn("schema_monitor", expr(full_struct_expr))
 
@@ -93,10 +105,6 @@ class SchemaQualityRegistry:
 
     @classmethod
     def _handle_required_missing(cls, df: DataFrame, check: dict) -> str:
-        """
-        Returns an array of column names that were marked required but are missing.
-        Output: array<string>
-        """
         required_cols = check.get("columns", [])
         if not required_cols:
             return "CAST(ARRAY() AS ARRAY<STRING>)"
@@ -112,10 +120,6 @@ class SchemaQualityRegistry:
 
     @classmethod
     def _handle_type_mismatch(cls, df: DataFrame, check: dict) -> str:
-        """
-        Returns an array of structs identifying mismatched column types.
-        Output: array<struct<column:string, expected_type:string, actual_type:string>>
-        """
         expected_types: Dict[str, str] = check.get("columns", {})
         if not expected_types:
             return "CAST(ARRAY() AS ARRAY<STRUCT<column:STRING, expected_type:STRING, actual_type:STRING>>)"
@@ -143,10 +147,6 @@ class SchemaQualityRegistry:
 
     @classmethod
     def _handle_no_duplicate_columns(cls, df: DataFrame, check: dict) -> str:
-        """
-        Validates duplicate column names in the schema definition.
-        Output: struct<condition:boolean, columns:array<string>>
-        """
         raw_cols = df.columns
         seen = set()
         duplicates = set()
@@ -166,10 +166,6 @@ class SchemaQualityRegistry:
 
     @classmethod
     def _handle_forbidden_exist(cls, df: DataFrame, check: dict) -> str:
-        """
-        Returns an array of forbidden column names found in the DataFrame.
-        Output: array<string>
-        """
         forbidden_cols = check.get("columns", [])
         if not forbidden_cols:
             return "CAST(ARRAY() AS ARRAY<STRING>)"
