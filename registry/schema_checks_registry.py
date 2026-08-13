@@ -10,15 +10,32 @@ class SchemaQualityRegistry:
     evaluating metadata lazily with zero Spark driver actions.
     """
 
+    @staticmethod
+    def _normalize_type(data_type: str) -> str:
+        """
+        Normalizes common SQL / PySpark type aliases for accurate comparison.
+        """
+        t = str(data_type).strip().lower()
+        type_map = {
+            "int": "int",
+            "integer": "int",
+            "bigint": "long",
+            "long": "long",
+            "smallint": "short",
+            "tinyint": "byte",
+            "double": "double",
+            "float": "float",
+            "str": "string",
+            "string": "string",
+            "bool": "boolean",
+            "boolean": "boolean",
+            "date": "date",
+            "timestamp": "timestamp"
+        }
+        return type_map.get(t, t)
+
     @classmethod
     def router(cls, df: DataFrame, check: dict) -> Tuple[str, str, str]:
-        """
-        Routes incoming schema checks to their corresponding generator methods.
-
-        :param df: Target PySpark DataFrame.
-        :param check: Dictionary containing schema check configuration.
-        :return: Tuple of (check_type: str, struct_field_sql_expr: str, severity: str)
-        """
         if not isinstance(check, dict):
             raise TypeError(f"[SchemaQualityRegistry] Check rule must be a dict, got '{type(check).__name__}'.")
 
@@ -27,7 +44,7 @@ class SchemaQualityRegistry:
 
         handlers = {
             "required_missing": cls._handle_required_missing,
-            "required_columns": cls._handle_required_missing,  # Alias support
+            "required_columns": cls._handle_required_missing,
             "type_mismatch": cls._handle_type_mismatch,
             "no_duplicate_columns": cls._handle_no_duplicate_columns,
             "no_duplicated_columns": cls._handle_no_duplicate_columns,
@@ -39,21 +56,12 @@ class SchemaQualityRegistry:
         if not handler:
             raise ValueError(f"[SchemaQualityRegistry] Unsupported check_type: '{check_type}'.")
 
-        # Standardize check key name for consistency
         std_key = "required_missing" if check_type == "required_columns" else check_type
 
         return std_key, handler(df=df, check=check), severity
 
     @classmethod
     def apply_schema_checks(cls, df: DataFrame, schema_checks: List[dict]) -> DataFrame:
-        """
-        Main entry point for evaluating schema rules.
-        Combines check expressions into a single structured PySpark `schema_monitor` column.
-
-        :param df: Input PySpark DataFrame.
-        :param schema_checks: List of schema check configurations.
-        :return: Updated DataFrame with `schema_monitor` Struct column attached.
-        """
         if not schema_checks:
             return df
 
@@ -66,7 +74,6 @@ class SchemaQualityRegistry:
             except Exception as e:
                 raise RuntimeError(f"Schema compilation failed for rule: {check}") from e
 
-        # Standardizing default fallback expressions
         default_fields = {
             "required_missing": "CAST(ARRAY() AS ARRAY<STRING>)",
             "type_mismatch": "CAST(ARRAY() AS ARRAY<STRUCT<column:STRING, expected_type:STRING, actual_type:STRING>>)",
@@ -78,7 +85,6 @@ class SchemaQualityRegistry:
             if key not in struct_fields:
                 struct_fields[key] = default_expr
 
-        # Calculate overall status dynamically
         status_expr = (
             f"CASE WHEN SIZE({struct_fields['required_missing']}) = 0 "
             f"AND SIZE({struct_fields['type_mismatch']}) = 0 "
@@ -98,10 +104,6 @@ class SchemaQualityRegistry:
         )
 
         return df.withColumn("schema_monitor", expr(full_struct_expr))
-
-    # -------------------------------------------------------------------------
-    # Internal Rule Generators (Zero Spark Actions)
-    # -------------------------------------------------------------------------
 
     @classmethod
     def _handle_required_missing(cls, df: DataFrame, check: dict) -> str:
@@ -124,21 +126,31 @@ class SchemaQualityRegistry:
         if not expected_types:
             return "CAST(ARRAY() AS ARRAY<STRUCT<column:STRING, expected_type:STRING, actual_type:STRING>>)"
 
-        current_dtypes = dict(df.dtypes)
+        # Normalizing current schema dtypes
+        current_dtypes = {col_name: cls._normalize_type(dtype) for col_name, dtype in df.dtypes}
         mismatch_structs = []
 
         for col_name, expected_type in expected_types.items():
-            if col_name in current_dtypes:
-                actual_type = current_dtypes[col_name].lower()
-                expected_type_norm = str(expected_type).lower()
+            expected_type_norm = cls._normalize_type(expected_type)
 
-                if actual_type != expected_type_norm:
+            if col_name in current_dtypes:
+                actual_type_norm = current_dtypes[col_name]
+
+                if actual_type_norm != expected_type_norm:
                     struct_expr = (
                         f"NAMED_STRUCT('column', '{col_name}', "
                         f"'expected_type', '{expected_type_norm}', "
-                        f"'actual_type', '{actual_type}')"
+                        f"'actual_type', '{actual_type_norm}')"
                     )
                     mismatch_structs.append(struct_expr)
+            else:
+                # Column is completely missing from DataFrame
+                struct_expr = (
+                    f"NAMED_STRUCT('column', '{col_name}', "
+                    f"'expected_type', '{expected_type_norm}', "
+                    f"'actual_type', 'MISSING_COLUMN')"
+                )
+                mismatch_structs.append(struct_expr)
 
         if not mismatch_structs:
             return "CAST(ARRAY() AS ARRAY<STRUCT<column:STRING, expected_type:STRING, actual_type:STRING>>)"
