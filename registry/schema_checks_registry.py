@@ -2,6 +2,8 @@ from typing import Dict, List, Tuple, Any
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import expr
 
+from yamlpipe.utility.enums import DataTypeAlias
+
 
 class SchemaQualityRegistry:
     """
@@ -10,46 +12,23 @@ class SchemaQualityRegistry:
     evaluating metadata lazily with zero Spark driver actions.
     """
 
-    @staticmethod
-    def _normalize_type(data_type: str) -> str:
-        """
-        Normalizes common SQL / PySpark type aliases for accurate comparison.
-        """
-        t = str(data_type).strip().lower()
-        type_map = {
-            "int": "int",
-            "integer": "int",
-            "bigint": "long",
-            "long": "long",
-            "smallint": "short",
-            "tinyint": "byte",
-            "double": "double",
-            "float": "float",
-            "str": "string",
-            "string": "string",
-            "bool": "boolean",
-            "boolean": "boolean",
-            "date": "date",
-            "timestamp": "timestamp"
-        }
-        return type_map.get(t, t)
-
     @classmethod
     def router(cls, df: DataFrame, check: dict) -> Tuple[str, str, str]:
         if not isinstance(check, dict):
             raise TypeError(f"[SchemaQualityRegistry] Check rule must be a dict, got '{type(check).__name__}'.")
 
         check_type = check.get("check_type", check.get("type", "N/A")).lower()
-        severity = check.get("severity", "error").lower() 
+        severity = check.get("severity", "warn").lower()
 
         handlers = {
             "required_missing": cls._handle_required_missing,
             "required_columns": cls._handle_required_missing,
             "type_mismatch": cls._handle_type_mismatch,
             "no_duplicate_columns": cls._handle_no_duplicate_columns,
+            "no_duplicate": cls._handle_no_duplicate_columns,
             "no_duplicated_columns": cls._handle_no_duplicate_columns,
             "forbidden_exist": cls._handle_forbidden_exist,
-            "forbidden_exists": cls._handle_forbidden_exist
+            "forbidden_exists": cls._handle_forbidden_exist,
         }
 
         handler = handlers.get(check_type)
@@ -126,12 +105,12 @@ class SchemaQualityRegistry:
         if not expected_types:
             return "CAST(ARRAY() AS ARRAY<STRUCT<column:STRING, expected_type:STRING, actual_type:STRING>>)"
 
-        # Normalizing current schema dtypes
-        current_dtypes = {col_name: cls._normalize_type(dtype) for col_name, dtype in df.dtypes}
+        # Normalize existing Spark DataFrame dtypes using DataTypeAlias Enum
+        current_dtypes = {col_name: DataTypeAlias.normalize(dtype) for col_name, dtype in df.dtypes}
         mismatch_structs = []
 
         for col_name, expected_type in expected_types.items():
-            expected_type_norm = cls._normalize_type(expected_type)
+            expected_type_norm = DataTypeAlias.normalize(expected_type)
 
             if col_name in current_dtypes:
                 actual_type_norm = current_dtypes[col_name]
@@ -144,7 +123,7 @@ class SchemaQualityRegistry:
                     )
                     mismatch_structs.append(struct_expr)
             else:
-                # Column is completely missing from DataFrame
+                # Column is missing completely
                 struct_expr = (
                     f"NAMED_STRUCT('column', '{col_name}', "
                     f"'expected_type', '{expected_type_norm}', "

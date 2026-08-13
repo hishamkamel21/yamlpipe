@@ -1,154 +1,81 @@
+from typing import Tuple 
+from yamlpipe.registry.struct_checks_registry import StructQualityChecks 
+from yamlpipe.registry.array_checks_registry import ArrayQualityChecks 
 
 
 class ArrayAndStructChecks:
-
-    EMPTY_ARRAY_SQL = "CAST(array() AS ARRAY<STRING>)"
-
-    @classmethod
-    def _extract_base_params(cls, check: dict, column: str):
-        from yamlpipe.registry.columns_quality_registry import ColumnQualityRegistry
-        return ColumnQualityRegistry._extract_base_params(check, column)
+    """Sub-router directing incoming Array and Struct quality checks."""
 
     @classmethod
-    def router(cls, check: dict, column: str):
-        check_type = check["check_type"].lower().strip()
+    def router(cls, check: dict, column: str) -> Tuple[str, str, str]:
+        check_type = check.get("check_type", check.get("type", "")).lower().strip()
 
-        if check_type == "array_not_empty":
-            return cls.array_not_empty_check(check, column)
-        elif check_type == "array_values_in_list":
-            return cls.array_values_in_list_check(check, column)
-        elif check_type in ("array_min_length", "array_max_length", "array_length"):
-            return cls.array_length_check(check, column)
-        elif check_type == "array_no_nulls":
-            return cls.array_no_nulls_check(check, column)
-        elif check_type == "array_distinct_values":
-            return cls.array_distinct_values_check(check, column)
-        elif check_type == "struct_not_empty":
-            return cls.struct_not_empty_check(check, column)
-        elif check_type == "struct_fields_not_null":
-            return cls.struct_fields_not_null_check(check, column)
-        else:
-            raise ValueError(f"Unsupported Array/Struct check type: '{check_type}'")
+        dispatch = {
+            # ------------------------------------------------------------------
+            # Array Checks
+            # ------------------------------------------------------------------
+            "array_not_empty": ArrayQualityChecks.not_empty_check,
+            "arr_not_empty": ArrayQualityChecks.not_empty_check,
 
-    @classmethod
-    def array_not_empty_check(cls, check: dict, column: str):
-        error_suffix = "ARRAY_EMPTY_ERROR"
-        severity, when_cond, col_expr = cls._extract_base_params(check, column)
-        cast_cond = f"({col_expr} IS NULL OR size({col_expr}) = 0)"
-        sql = f"""
-        CASE
-            WHEN ({when_cond}) AND ({cast_cond})
-            THEN array('{column}_{error_suffix}')
-            ELSE {cls.EMPTY_ARRAY_SQL}
-        END
-        """
-        return sql, severity, error_suffix
+            "array_values_in_list": ArrayQualityChecks.values_in_list_check,
+            "arr_values_in_list": ArrayQualityChecks.values_in_list_check,
+            "array_accepeted_values": ArrayQualityChecks.values_in_list_check,
+            "arr_accepeted_values": ArrayQualityChecks.values_in_list_check,
 
-    @classmethod
-    def array_values_in_list_check(cls, check: dict, column: str):
-        error_suffix = "ARRAY_INVALID_VALUES_ERROR"
-        severity, when_cond, col_expr = cls._extract_base_params(check, column)
-        allowed_values = check.get("values", check.get("allowed_values", []))
-        if not allowed_values:
-            raise ValueError(f"array_values_in_list check for '{column}' requires 'values' list.")
+            "array_values_regex": ArrayQualityChecks.values_regex_check,
+            "arr_values_regex": ArrayQualityChecks.values_regex_check,
+            "arr_regex": ArrayQualityChecks.values_regex_check,
+            "arr_regex_match":ArrayQualityChecks.values_regex_check,
+            "values_regex": ArrayQualityChecks.values_regex_check,
+            "values_regex_match": ArrayQualityChecks.values_regex_check,
 
-        formatted_vals = ", ".join([f"'{v}'" if isinstance(v, str) else str(v) for v in allowed_values])
-        cast_cond = f"NOT forall({col_expr}, x -> x IN ({formatted_vals}))"
-        sql = f"""
-        CASE
-            WHEN ({when_cond}) 
-                 AND {col_expr} IS NOT NULL 
-                 AND size({col_expr}) > 0 
-                 AND ({cast_cond})
-            THEN array('{column}_{error_suffix}')
-            ELSE {cls.EMPTY_ARRAY_SQL}
-        END
-        """
-        return sql, severity, error_suffix
+            "array_values_range": ArrayQualityChecks.values_range_check,
+            "arr_values_range": ArrayQualityChecks.values_range_check,
+            "values_range": ArrayQualityChecks.values_range_check,
 
-    @classmethod
-    def array_length_check(cls, check: dict, column: str):
-        error_suffix = "ARRAY_LENGTH_ERROR"
-        severity, when_cond, col_expr = cls._extract_base_params(check, column)
-        length_cfg = check.get("length", check)
-        minimum = length_cfg.get("min")
-        maximum = length_cfg.get("max")
+            "array_length": ArrayQualityChecks.length_check,
+            "array_min_length": ArrayQualityChecks.length_check,
+            "array_max_length": ArrayQualityChecks.length_check,
 
-        conditions = []
-        if minimum is not None:
-            conditions.append(f"size({col_expr}) < {minimum}")
-        if maximum is not None:
-            conditions.append(f"size({col_expr}) > {maximum}")
+            "array_no_nulls": ArrayQualityChecks.no_nulls_check,
+            "no_nulls": ArrayQualityChecks.no_nulls_check,
 
-        if not conditions:
-            raise ValueError(f"Array length check on '{column}' requires 'min' or 'max'.")
+            "array_distinct_values": ArrayQualityChecks.distinct_values_check,
+            "distinct_values": ArrayQualityChecks.distinct_values_check,
+            "arr_distinct_values": ArrayQualityChecks.distinct_values_check,
 
-        condition = " OR ".join(conditions)
-        sql = f"""
-        CASE
-            WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({condition})
-            THEN array('{column}_{error_suffix}')
-            ELSE {cls.EMPTY_ARRAY_SQL}
-        END
-        """
-        return sql, severity, error_suffix
+            # ------------------------------------------------------------------
+            # Struct Checks (Mapping user check_types and standard check_types)
+            # ------------------------------------------------------------------
+            "struct_not_empty": StructQualityChecks.not_empty_check,
 
-    @classmethod
-    def array_no_nulls_check(cls, check: dict, column: str):
-        error_suffix = "ARRAY_CONTAINS_NULL_ERROR"
-        severity, when_cond, col_expr = cls._extract_base_params(check, column)
-        cast_cond = f"exists({col_expr}, x -> x IS NULL)"
-        sql = f"""
-        CASE
-            WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({cast_cond})
-            THEN array('{column}_{error_suffix}')
-            ELSE {cls.EMPTY_ARRAY_SQL}
-        END
-        """
-        return sql, severity, error_suffix
+            "feilds_not_null": StructQualityChecks.fields_not_null_check,
+            "struct_fields_not_null": StructQualityChecks.fields_not_null_check,
+            "fields_not_null": StructQualityChecks.fields_not_null_check,
 
-    @classmethod
-    def array_distinct_values_check(cls, check: dict, column: str):
-        error_suffix = "ARRAY_DUPLICATE_VALUES_ERROR"
-        severity, when_cond, col_expr = cls._extract_base_params(check, column)
-        cast_cond = f"size({col_expr}) != size(array_distinct({col_expr}))"
-        sql = f"""
-        CASE
-            WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({cast_cond})
-            THEN array('{column}_{error_suffix}')
-            ELSE {cls.EMPTY_ARRAY_SQL}
-        END
-        """
-        return sql, severity, error_suffix
+            "feild_not_null": StructQualityChecks.field_not_null_check,
+            "struct_field_not_null": StructQualityChecks.field_not_null_check,
+            "field_not_null": StructQualityChecks.field_not_null_check,
 
-    @classmethod
-    def struct_not_empty_check(cls, check: dict, column: str):
-        error_suffix = "STRUCT_EMPTY_ERROR"
-        severity, when_cond, col_expr = cls._extract_base_params(check, column)
-        sql = f"""
-        CASE
-            WHEN ({when_cond}) AND ({col_expr} IS NULL)
-            THEN array('{column}_{error_suffix}')
-            ELSE {cls.EMPTY_ARRAY_SQL}
-        END
-        """
-        return sql, severity, error_suffix
+            "feild_regex_match": StructQualityChecks.field_regex_check,
+            "struct_field_regex": StructQualityChecks.field_regex_check,
+            "field_regex_match": StructQualityChecks.field_regex_check,
 
-    @classmethod
-    def struct_fields_not_null_check(cls, check: dict, column: str):
-        error_suffix = "STRUCT_FIELD_NULL_ERROR"
-        severity, when_cond, col_expr = cls._extract_base_params(check, column)
-        fields = check.get("fields", [])
-        if not fields:
-            raise ValueError(f"struct_fields_not_null check on '{column}' requires a 'fields' list.")
+            "feild_length": StructQualityChecks.field_length_check,
+            "struct_field_length": StructQualityChecks.field_length_check,
+            "field_length": StructQualityChecks.field_length_check,
 
-        null_checks = [f"{col_expr}.{field} IS NULL" for field in fields]
-        condition = " OR ".join(null_checks)
-        sql = f"""
-        CASE
-            WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({condition})
-            THEN array('{column}_{error_suffix}')
-            ELSE {cls.EMPTY_ARRAY_SQL}
-        END
-        """
-        return sql, severity, error_suffix
+            "feild_range": StructQualityChecks.field_range_check,
+            "struct_field_range": StructQualityChecks.field_range_check,
+            "field_range": StructQualityChecks.field_range_check,
+
+            "feild_values_in_list": StructQualityChecks.field_values_in_list_check,
+            "struct_field_values_in_list": StructQualityChecks.field_values_in_list_check,
+            "field_values_in_list": StructQualityChecks.field_values_in_list_check,
+        }
+
+        handler = dispatch.get(check_type)
+        if not handler:
+            raise ValueError(f"Unsupported Array/Struct check type: '{check_type}' for column '{column}'")
+
+        return handler(check, column)

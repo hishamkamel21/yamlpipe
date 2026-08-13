@@ -18,13 +18,14 @@ class ColumnQualityRegistry:
         check_type = check.get("check_type", check.get("type", None))
 
         prefix = check_type.split("_")[0]
-        if prefix in ("array", "struct"):
+        if prefix in ("array", "struct","arr","field","feild","value","values","distinct"):
             return ArrayAndStructChecks.router(check, column)
 
         dispatch = {
             "not_null": cls.not_null_check,
             "not_empty": cls.not_empty_check,
             "regex": cls.regex_check,
+            "match_regex": cls.regex_check,
             "accepted_values": cls.accepted_values_check,
             "value_in_list": cls.accepted_values_check,
             "range": cls.range_check,
@@ -32,12 +33,15 @@ class ColumnQualityRegistry:
             "compare_columns": cls.compare_columns_check,
             "compare": cls.compare_columns_check,
             "is_type": cls.is_type_check,
+            "type_of": cls.is_type_check,
             "not_future_date": cls.not_future_date_check,
             "not_future_time": cls.not_future_time_check,
             "custom": cls.custom_check,
+            None: cls.custom_check,
         }
 
         handler = dispatch.get(check_type)
+        
         if not handler:
             raise ValueError(f"Unsupported check type '{check_type}' for column '{column}'")
 

@@ -1,4 +1,3 @@
-# yamlpipe/enums.py
 from enum import Enum
 
 
@@ -22,29 +21,32 @@ class DataTypeAlias(Enum):
     # Integers
     INT = "int"
     INTEGER = "int"
-    BIGINT = "bigint"
-    SMALLINT = "smallint"
-    TINYINT = "tinyint"
-    
+    BIGINT = "long"
+    LONG = "long"
+    SMALLINT = "short"
+    SHORT = "short"
+    TINYINT = "byte"
+    BYTE = "byte"
+
     # Floats & Decimals
     DOUBLE = "double"
-    DOBULE = "double"  # Handles typo
+    DOBULE = "double"  # Common typo handling
     FLOAT = "float"
     DECIMAL = "decimal"
     NUMERIC = "decimal"
-    
+
     # Strings
     STRING = "string"
     STR = "string"
     VARCHAR = "string"
     TEXT = "string"
-    
+
     # Dates & Timestamps
     DATE = "date"
     TIMESTAMP = "timestamp"
     DATETIME = "timestamp"
     TIME = "timestamp"
-    
+
     # Booleans
     BOOL = "boolean"
     BOOLEAN = "boolean"
@@ -53,9 +55,9 @@ class DataTypeAlias(Enum):
     def normalize(cls, type_str: str) -> str:
         """
         Normalizes input string to canonical Spark SQL data type.
-        Falls back to raw lowercase string if not found in alias map.
+        Falls back to raw lowercase string if not found in alias enum.
         """
-        cleaned = type_str.strip().lower()
+        cleaned = str(type_str).strip().lower()
         if cleaned in cls.__members__:
             return cls[cleaned].value
         return cleaned
