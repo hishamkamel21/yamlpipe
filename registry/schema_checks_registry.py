@@ -1,9 +1,6 @@
-import logging
 from typing import Dict, List, Tuple, Any
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import expr
-
-logger = logging.getLogger("SchemaQualityRegistry")
 
 
 class SchemaQualityRegistry:
@@ -25,7 +22,7 @@ class SchemaQualityRegistry:
         if not isinstance(check, dict):
             raise TypeError(f"[SchemaQualityRegistry] Check rule must be a dict, got '{type(check).__name__}'.")
 
-        check_type = check.get("check_type",check.get("type","N/A")).lower()
+        check_type = check.get("check_type", check.get("type", "N/A")).lower()
         severity = check.get("severity", "error").lower() 
 
         handlers = {
@@ -35,6 +32,7 @@ class SchemaQualityRegistry:
             "no_duplicate_columns": cls._handle_no_duplicate_columns,
             "no_duplicated_columns": cls._handle_no_duplicate_columns,
             "forbidden_exist": cls._handle_forbidden_exist,
+            "forbidden_exists": cls._handle_forbidden_exist
         }
 
         handler = handlers.get(check_type)
@@ -66,15 +64,14 @@ class SchemaQualityRegistry:
                 key, field_expr, _ = cls.router(df, check)
                 struct_fields[key] = field_expr
             except Exception as e:
-                logger.error(f"Failed to compile schema check '{check.get('check_type')}': {str(e)}")
                 raise RuntimeError(f"Schema compilation failed for rule: {check}") from e
 
-        # Ensure all key fields exist in the output struct even if omitted from YAML
+        # تصحيح صياغة SQL لإنشاء Empty Arrays مع Cast صريح مقبول في Spark SQL Parser
         default_fields = {
-            "required_missing": "array().cast('array<string>')",
-            "type_mismatch": "array().cast('array<struct<column:string,expected_type:string,actual_type:string>>')",
-            "no_duplicate_columns": "struct(true AS condition, array().cast('array<string>') AS columns)",
-            "forbidden_exist": "array().cast('array<string>')",
+            "required_missing": "CAST(ARRAY() AS ARRAY<STRING>)",
+            "type_mismatch": "CAST(ARRAY() AS ARRAY<STRUCT<column:STRING, expected_type:STRING, actual_type:STRING>>)",
+            "no_duplicate_columns": "STRUCT(true AS condition, CAST(ARRAY() AS ARRAY<STRING>) AS columns)",
+            "forbidden_exist": "CAST(ARRAY() AS ARRAY<STRING>)",
         }
 
         for key, default_expr in default_fields.items():
@@ -86,7 +83,7 @@ class SchemaQualityRegistry:
         for key in ["required_missing", "type_mismatch", "no_duplicate_columns", "forbidden_exist"]:
             struct_args.append(f"{struct_fields[key]} AS {key}")
 
-        full_struct_expr = f"struct({','.join(struct_args)})"
+        full_struct_expr = f"named_struct('required_missing', {struct_fields['required_missing']}, 'type_mismatch', {struct_fields['type_mismatch']}, 'no_duplicate_columns', {struct_fields['no_duplicate_columns']}, 'forbidden_exist', {struct_fields['forbidden_exist']})"
 
         return df.withColumn("schema_monitor", expr(full_struct_expr))
 
@@ -102,16 +99,16 @@ class SchemaQualityRegistry:
         """
         required_cols = check.get("columns", [])
         if not required_cols:
-            return "array().cast('array<string>')"
+            return "CAST(ARRAY() AS ARRAY<STRING>)"
 
         existing_cols = set(df.columns)
         missing_cols = [c for c in required_cols if c not in existing_cols]
 
         if not missing_cols:
-            return "array().cast('array<string>')"
+            return "CAST(ARRAY() AS ARRAY<STRING>)"
 
         formatted_cols = [f"'{c}'" for c in missing_cols]
-        return f"array({','.join(formatted_cols)})"
+        return f"ARRAY({','.join(formatted_cols)})"
 
     @classmethod
     def _handle_type_mismatch(cls, df: DataFrame, check: dict) -> str:
@@ -121,7 +118,7 @@ class SchemaQualityRegistry:
         """
         expected_types: Dict[str, str] = check.get("columns", {})
         if not expected_types:
-            return "array().cast('array<struct<column:string,expected_type:string,actual_type:string>>')"
+            return "CAST(ARRAY() AS ARRAY<STRUCT<column:STRING, expected_type:STRING, actual_type:STRING>>)"
 
         current_dtypes = dict(df.dtypes)
         mismatch_structs = []
@@ -133,16 +130,16 @@ class SchemaQualityRegistry:
 
                 if actual_type != expected_type_norm:
                     struct_expr = (
-                        f"struct('{col_name}' AS column, "
-                        f"'{expected_type_norm}' AS expected_type, "
-                        f"'{actual_type}' AS actual_type)"
+                        f"NAMED_STRUCT('column', '{col_name}', "
+                        f"'expected_type', '{expected_type_norm}', "
+                        f"'actual_type', '{actual_type}')"
                     )
                     mismatch_structs.append(struct_expr)
 
         if not mismatch_structs:
-            return "array().cast('array<struct<column:string,expected_type:string,actual_type:string>>')"
+            return "CAST(ARRAY() AS ARRAY<STRUCT<column:STRING, expected_type:STRING, actual_type:STRING>>)"
 
-        return f"array({','.join(mismatch_structs)})"
+        return f"ARRAY({','.join(mismatch_structs)})"
 
     @classmethod
     def _handle_no_duplicate_columns(cls, df: DataFrame, check: dict) -> str:
@@ -162,10 +159,10 @@ class SchemaQualityRegistry:
                 seen.add(c_lower)
 
         if not duplicates:
-            return "struct(true AS condition, array().cast('array<string>') AS columns)"
+            return "STRUCT(true AS condition, CAST(ARRAY() AS ARRAY<STRING>) AS columns)"
 
         formatted_dups = [f"'{c}'" for c in duplicates]
-        return f"struct(false AS condition, array({','.join(formatted_dups)}) AS columns)"
+        return f"STRUCT(false AS condition, ARRAY({','.join(formatted_dups)}) AS columns)"
 
     @classmethod
     def _handle_forbidden_exist(cls, df: DataFrame, check: dict) -> str:
@@ -175,13 +172,13 @@ class SchemaQualityRegistry:
         """
         forbidden_cols = check.get("columns", [])
         if not forbidden_cols:
-            return "array().cast('array<string>')"
+            return "CAST(ARRAY() AS ARRAY<STRING>)"
 
         existing_cols = set(df.columns)
         found_forbidden = [c for c in forbidden_cols if c in existing_cols]
 
         if not found_forbidden:
-            return "array().cast('array<string>')"
+            return "CAST(ARRAY() AS ARRAY<STRING>)"
 
         formatted_forbidden = [f"'{c}'" for c in found_forbidden]
-        return f"array({','.join(formatted_forbidden)})"
+        return f"ARRAY({','.join(formatted_forbidden)})"
