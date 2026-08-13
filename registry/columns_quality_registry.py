@@ -27,7 +27,7 @@ class ColumnQualityRegistry:
             "regex": cls.regex_check,
             "match_regex": cls.regex_check,
             "accepted_values": cls.accepted_values_check,
-            "value_in_list": cls.accepted_values_check,
+            "values_in_list": cls.accepted_values_check,
             "range": cls.range_check,
             "length": cls.length_check,
             "compare_columns": cls.compare_columns_check,
