@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Any, List, Set
+from typing import Dict, Any, List, Set, Tuple, Generator
 from yamlpipe.registry.columns_quality_registry import ColumnQualityRegistry
 
 logger = logging.getLogger("ColumnQualityParser")
@@ -11,7 +11,7 @@ class ColumnQualityParser:
     def parse_yaml_checks(cls, yaml_config: Dict[str, Any]) -> Dict[str, Any]:
         """
         Parses the 'columns_checks' section from the YAML config.
-        Extracts SQL expressions into Python lists per severity and collects suffixes returned by the registry router.
+        Supports both traditional Column-First format and Check-First bulk checks format.
 
         Returns:
             dict: {
@@ -38,23 +38,20 @@ class ColumnQualityParser:
         registered_error_suffixes: Set[str] = set()
 
         for col_entry in columns_checks_config:
-            column_name = col_entry.get("column")
-            checks = col_entry.get("checks", [])
-
-            if not column_name:
-                logger.warning("Skipping column entry missing 'column' field.")
+            if not isinstance(col_entry, dict):
+                logger.warning(f"Skipping invalid column entry: {col_entry}")
                 continue
 
-            for check in checks:
+            # Process all (check, column) pairs derived from the entry
+            for check, column_name in cls._for_each_column(col_entry):
                 try:
-                    # 1. Router returns sql_expr, severity, and the exact error suffix
+                    # Router returns sql_expr, severity, and error suffix
                     sql_expr, severity, suffix = ColumnQualityRegistry.router(check, column_name)
                     cleaned_sql = sql_expr.strip()
 
                     if suffix:
                         registered_error_suffixes.add(suffix)
 
-                    # 2. Append SQL string directly to corresponding python list
                     if severity == "error":
                         error_expressions.append(cleaned_sql)
                     elif severity in ("warn", "warning"):
@@ -79,3 +76,52 @@ class ColumnQualityParser:
             },
             "registered_error_suffixes": sorted(list(registered_error_suffixes))
         }
+
+    @classmethod
+    def _for_each_column(cls, entry: Dict[str, Any]) -> Generator[Tuple[Dict[str, Any], str], None, None]:
+        """
+        Normalizes both YAML syntax structures into (check_dict, column_name) pairs.
+
+        1. Column-First Format:
+           - column: customer_id
+             checks:
+               - check_type: not_null
+                 severity: error
+
+        2. Check-First Format:
+           - check_type: not_null  # or type: not_null
+             severity: error
+             columns:
+               - customer_id
+               - age
+        """
+        column_name = entry.get("column")
+        check_type = entry.get("check_type") or entry.get("type")
+
+        # Format 1: Column-First syntax
+        if column_name:
+            checks = entry.get("checks", [])
+            for check in checks:
+                if isinstance(check, dict):
+                    yield check, column_name
+                else:
+                    logger.warning(f"Skipping invalid check structure under column '{column_name}': {check}")
+
+        # Format 2: Check-First syntax
+        elif check_type:
+            target_columns = entry.get("columns", [])
+            if not isinstance(target_columns, list) or not target_columns:
+                logger.warning(f"Check-First entry for '{check_type}' missing 'columns' list.")
+                return
+
+            # Extract check payload without the 'columns' key to avoid router pollution
+            check_payload = {k: v for k, v in entry.items() if k != "columns"}
+
+            for col in target_columns:
+                if isinstance(col, str) and col.strip():
+                    yield check_payload, col.strip()
+                else:
+                    logger.warning(f"Skipping invalid column name '{col}' in check '{check_type}'.")
+
+        else:
+            logger.warning("Skipping entry that matches neither Column-First nor Check-First format.")
