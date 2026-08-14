@@ -12,15 +12,26 @@ class StructQualityChecks:
         return ColumnQualityRegistry._extract_base_params(check, column)
 
     @classmethod
+    def _format_error_tag(cls, column: str, field: str, suffix: str) -> str:
+        """يضمن بناء اسم خطأ نظيف بدون نقاط قد تسبب مشاكل بالـ SQL parsing."""
+        if field:
+            full_path = f"{column}_{field}"
+        else:
+            full_path = column
+        safe_path = full_path.replace(".", "_")
+        return f"{safe_path}_{suffix}"
+
+    @classmethod
     def not_empty_check(cls, check: dict, column: str) -> Tuple[str, str, str]:
         error_suffix = "STRUCT_EMPTY_ERROR"
         try:
             severity, when_cond, col_expr = cls._extract_base_params(check, column)
+            error_tag = cls._format_error_tag(column, "", error_suffix)
 
             sql = f"""
             CASE
                 WHEN ({when_cond}) AND ({col_expr} IS NULL)
-                THEN array('{column}_{error_suffix}')
+                THEN array('{error_tag}')
                 ELSE {cls.EMPTY_ARRAY_SQL}
             END
             """
@@ -42,11 +53,12 @@ class StructQualityChecks:
 
             null_checks = [f"{col_expr}.{field} IS NULL" for field in fields]
             condition = " OR ".join(null_checks)
+            error_tag = cls._format_error_tag(column, "", error_suffix)
 
             sql = f"""
             CASE
                 WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({condition})
-                THEN array('{column}_{error_suffix}')
+                THEN array('{error_tag}')
                 ELSE {cls.EMPTY_ARRAY_SQL}
             END
             """
@@ -66,11 +78,12 @@ class StructQualityChecks:
 
             field_expr = f"{col_expr}.{field}"
             condition = f"{field_expr} IS NULL"
+            error_tag = cls._format_error_tag(column, field, error_suffix)
 
             sql = f"""
             CASE
                 WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({condition})
-                THEN array('{field_expr}_{error_suffix}')
+                THEN array('{error_tag}')
                 ELSE {cls.EMPTY_ARRAY_SQL}
             END
             """
@@ -97,11 +110,12 @@ class StructQualityChecks:
 
             field_expr = f"{col_expr}.{field}"
             condition = f"{field_expr} IS NOT NULL AND NOT ({field_expr} RLIKE '{sql_safe_pattern}')"
+            error_tag = cls._format_error_tag(column, field, error_suffix)
 
             sql = f"""
             CASE
                 WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({condition})
-                THEN array('{field_expr}_{error_suffix}')
+                THEN array('{error_tag}')
                 ELSE {cls.EMPTY_ARRAY_SQL}
             END
             """
@@ -138,11 +152,12 @@ class StructQualityChecks:
                 )
 
             condition = f"{field_expr} IS NOT NULL AND (" + " OR ".join(conditions) + ")"
+            error_tag = cls._format_error_tag(column, field, error_suffix)
 
             sql = f"""
             CASE
                 WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({condition})
-                THEN array('{field_expr}_{error_suffix}')
+                THEN array('{error_tag}')
                 ELSE {cls.EMPTY_ARRAY_SQL}
             END
             """
@@ -179,11 +194,12 @@ class StructQualityChecks:
                 )
 
             condition = f"{field_expr} IS NOT NULL AND (" + " OR ".join(conditions) + ")"
+            error_tag = cls._format_error_tag(column, field, error_suffix)
 
             sql = f"""
             CASE
                 WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({condition})
-                THEN array('{field_expr}_{error_suffix}')
+                THEN array('{error_tag}')
                 ELSE {cls.EMPTY_ARRAY_SQL}
             END
             """
@@ -206,14 +222,15 @@ class StructQualityChecks:
                     f"Check 'feild_values_in_list' on column '{column}' requires 'feild'/'field' and 'values'/'allowed_values'."
                 )
 
-            formatted_vals = ", ".join([f"'{v}'" if isinstance(v, str) else str(v) for v in allowed_values])
+            formatted_vals = ", ".join([f"'{str(v).replace('\'', '\'\'')}'" if isinstance(v, str) else str(v) for v in allowed_values])
             field_expr = f"{col_expr}.{field}"
             condition = f"{field_expr} IS NOT NULL AND {field_expr} NOT IN ({formatted_vals})"
+            error_tag = cls._format_error_tag(column, field, error_suffix)
 
             sql = f"""
             CASE
                 WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({condition})
-                THEN array('{field_expr}_{error_suffix}')
+                THEN array('{error_tag}')
                 ELSE {cls.EMPTY_ARRAY_SQL}
             END
             """
