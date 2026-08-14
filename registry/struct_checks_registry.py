@@ -70,7 +70,7 @@ class StructQualityChecks:
             sql = f"""
             CASE
                 WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({condition})
-                THEN array('{column}_{error_suffix}')
+                THEN array('{field_expr}_{error_suffix}')
                 ELSE {cls.EMPTY_ARRAY_SQL}
             END
             """
@@ -93,13 +93,15 @@ class StructQualityChecks:
                     f"Check 'feild_regex_match' on column '{column}' requires both 'feild'/'field' and 'pattern'/'regex'."
                 )
 
+            sql_safe_pattern = pattern.replace("'", "''")
+
             field_expr = f"{col_expr}.{field}"
-            condition = f"{field_expr} IS NOT NULL AND NOT ({field_expr} RLIKE '{pattern}')"
+            condition = f"{field_expr} IS NOT NULL AND NOT ({field_expr} RLIKE '{sql_safe_pattern}')"
 
             sql = f"""
             CASE
                 WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({condition})
-                THEN array('{column}_{error_suffix}')
+                THEN array('{field_expr}_{error_suffix}')
                 ELSE {cls.EMPTY_ARRAY_SQL}
             END
             """
@@ -181,7 +183,7 @@ class StructQualityChecks:
             sql = f"""
             CASE
                 WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND ({condition})
-                THEN array('{column}_{error_suffix}')
+                THEN array('{field_expr}_{error_suffix}')
                 ELSE {cls.EMPTY_ARRAY_SQL}
             END
             """
