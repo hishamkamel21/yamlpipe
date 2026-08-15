@@ -10,21 +10,19 @@ logger = logging.getLogger("TransformationParser")
 
 class TransformationParser:
 
-    # Regex pattern to match ${column}, ${col}, and ${c} (case-insensitive)
     PLACEHOLDER_PATTERN = re.compile(r"\$\{(column|col|c)\}", re.IGNORECASE)
 
     @classmethod
     def parse(cls, raw_config: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Parses raw YAML transformation configuration into an intermediate structure.
-        Validates job dependency lineage and extracts SQL expressions.
-        Supports single-column, multi-column bulk rules, and 'run' directives (e.g., location.*).
+        Parses raw YAML configuration into job execution specs for PySpark SQL execution.
         """
         if not isinstance(raw_config, dict):
             raise TypeError(f"[TransformationParser Error] Expected dict, got {type(raw_config).__name__}")
 
         raw_table = raw_config.get("table") or raw_config.get("table_name", "unknown_table")
         cleaned_table_name = Helper.parse_table_name(raw_table)
+        main_alias = raw_config.get("alias", "main_tbl")
         raw_jobs = raw_config.get("jobs", [])
 
         parsed_jobs: Dict[str, Dict[str, Any]] = {}
@@ -34,7 +32,6 @@ class TransformationParser:
             if not isinstance(job_entry, dict) or not job_entry:
                 continue
 
-            # Extract job_name and job_body (e.g., 'base': {...})
             job_name, job_details = next(iter(job_entry.items()))
 
             if job_name in defined_job_names:
@@ -53,53 +50,40 @@ class TransformationParser:
                         f"[TransformationParser Error] Job '{job_name}' depends on unknown job '{source_step}'."
                     )
 
-            # Parse rules inside the job
+            # Parse expressions and Joins
             exprs: List[str] = []
             explicitly_handled_cols: Set[str] = set()
             select_the_rest_config = None
 
+            # Parse Joins
+            parsed_joins: List[str] = []
+            for join_cfg in job_details.get("joins", []):
+                parsed_joins.append(TransformationRegistry.build_join_clause(join_cfg))
+
+            # Parse Rules
             for rule in job_details.get("rules", []):
                 if not isinstance(rule, dict):
-                    logger.warning(f"Skipping non-dict rule in job '{job_name}': {rule}")
                     continue
 
-                # 1. Handle select_the_rest directive
                 if "select_the_rest" in rule:
                     select_the_rest_config = cls._parse_select_the_rest(rule["select_the_rest"])
                     continue
 
-                # 2. Handle raw 'run' directive (e.g., run: location.*)
                 if "run" in rule:
                     run_exprs = cls._parse_run_directive(rule["run"], job_name)
                     exprs.extend(run_exprs)
-                    # NOTE: We deliberately do NOT add parent struct (e.g., 'location') to
-                    # explicitly_handled_cols so select_the_rest won't drop it prematurely.
                     continue
 
-                # 3. Expand standard column-based rules (column / columns)
-                rule_expanded = False
                 for expanded_rule, col_name in cls._expand_rule(rule):
-                    rule_expanded = True
                     try:
                         explicitly_handled_cols.add(col_name)
                         expr_str = TransformationRegistry.build_rule_expr(expanded_rule)
                         exprs.append(expr_str)
                     except Exception as e:
-                        logger.error(
-                            f"Failed to build transformation expression for column '{col_name}' "
-                            f"in job '{job_name}'. Rule details: {expanded_rule}"
-                        )
                         raise RuntimeError(
                             f"[TransformationParser Error] Job '{job_name}', Column '{col_name}': {str(e)}"
                         ) from e
 
-                if not rule_expanded:
-                    logger.warning(
-                        f"Rule in job '{job_name}' skipped because it lacks valid target directives "
-                        f"('column', 'columns', 'run', or 'select_the_rest'): {rule}"
-                    )
-
-            # Update 'except' list inside select_the_rest to include explicitly handled columns automatically
             if select_the_rest_config and select_the_rest_config.get("enable"):
                 existing_except = set(select_the_rest_config.get("except", []))
                 merged_except = sorted(list(existing_except.union(explicitly_handled_cols)))
@@ -108,6 +92,7 @@ class TransformationParser:
             parsed_jobs[job_name] = {
                 "depend_on": source_step,
                 "exprs": exprs,
+                "joins": parsed_joins,
                 "explicitly_handled_cols": sorted(list(explicitly_handled_cols)),
                 "select_the_rest": select_the_rest_config
             }
@@ -116,78 +101,49 @@ class TransformationParser:
 
         return {
             "table": cleaned_table_name,
+            "alias": main_alias,
             "jobs": parsed_jobs
         }
 
     @classmethod
     def _parse_run_directive(cls, run_val: Any, job_name: str) -> List[str]:
-        """
-        Parses 'run' directive values (e.g., 'location.*' or list of statements).
-        Takes raw string expressions directly without requiring parameters or aliases.
-        """
         raw_statements: List[str] = []
-
-        if isinstance(run_val, str):
-            if run_val.strip():
-                raw_statements.append(run_val.strip())
+        if isinstance(run_val, str) and run_val.strip():
+            raw_statements.append(run_val.strip())
         elif isinstance(run_val, list):
             for stmt in run_val:
                 if isinstance(stmt, str) and stmt.strip():
                     raw_statements.append(stmt.strip())
-                else:
-                    logger.warning(f"Skipping non-string item in 'run' directive list for job '{job_name}': {stmt}")
         elif isinstance(run_val, dict):
             expr = run_val.get("expr") or run_val.get("expression")
             if expr and isinstance(expr, str):
                 raw_statements.append(expr.strip())
-            else:
-                logger.warning(f"Invalid dict payload in 'run' directive for job '{job_name}': {run_val}")
-        else:
-            raise TypeError(f"[TransformationParser Error] Unsupported type for 'run' in job '{job_name}': {type(run_val)}")
-
         return raw_statements
 
     @classmethod
     def _expand_rule(cls, rule: Dict[str, Any]) -> Generator[Tuple[Dict[str, Any], str], None, None]:
-        """
-        Yields (single_column_rule, column_name) pairs by expanding bulk 'columns' lists 
-        and replacing ${column}, ${col}, or ${c} placeholders dynamically.
-        """
         single_col = rule.get("column")
         multi_cols = rule.get("columns")
 
-        # Format 1: Single column rule
         if single_col:
             target_col = str(single_col).strip()
             rule_copy = copy.deepcopy(rule)
             rule_copy = cls._replace_column_placeholders(rule_copy, target_col)
             yield rule_copy, target_col
 
-        # Format 2: Multi column bulk rule
-        elif multi_cols:
-            if not isinstance(multi_cols, list) or not multi_cols:
-                logger.warning(f"Rule with 'columns' key missing valid column list: {rule}")
-                return
-
+        elif multi_cols and isinstance(multi_cols, list):
             for col in multi_cols:
                 if not col or not str(col).strip():
                     continue
                 target_col = str(col).strip()
-                
-                # Copy rule, assign target column, and remove bulk 'columns' key
                 rule_copy = copy.deepcopy(rule)
                 rule_copy.pop("columns", None)
                 rule_copy["column"] = target_col
-                
-                # Replace ${column}, ${col}, and ${c} placeholders
                 rule_copy = cls._replace_column_placeholders(rule_copy, target_col)
                 yield rule_copy, target_col
 
     @classmethod
     def _replace_column_placeholders(cls, item: Any, column_name: str) -> Any:
-        """
-        Recursively replaces '${column}', '${col}', and '${c}' occurrences with the target column name.
-        """
         if isinstance(item, str):
             return cls.PLACEHOLDER_PATTERN.sub(column_name, item)
         elif isinstance(item, dict):
@@ -209,11 +165,10 @@ class TransformationParser:
         elif isinstance(raw_except, list):
             except_list = raw_except
         else:
-            raise TypeError(
-                f"[TransformationParser Error] Invalid type for 'except' in select_the_rest: {type(raw_except)}"
-            )
+            raise TypeError(f"Invalid type for 'except': {type(raw_except)}")
 
         return {
             "enable": True,
-            "except": except_list
+            "except": except_list,
+            "from_alias": config.get("from_alias")
         }

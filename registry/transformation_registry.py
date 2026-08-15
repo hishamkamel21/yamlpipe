@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Any, Union
+from typing import Dict, Any, List
 from yamlpipe.utility.module_loader import ModuleLoader
 from yamlpipe.utility.helper import Helper
 
@@ -10,12 +10,10 @@ class TransformationRegistry:
 
     @classmethod
     def build_rule_expr(cls, rule: Dict[str, Any]) -> str:
-        """
-        Translates a single column transformation rule into a SQL select expression string.
-        """
+        """Translates a single column transformation rule into a SQL select expression."""
         column_name = rule.get("column")
         if not column_name:
-            raise ValueError(f"Rule missing required 'column' key: {rule}")
+            raise ValueError(f"[Transformation Error] Rule missing required 'column' key: {rule}")
 
         # 1. Direct SQL Expression
         if "expression" in rule:
@@ -43,3 +41,38 @@ class TransformationRegistry:
                 raise RuntimeError(f"Transformation function '{func_name}' error: {str(e)}") from e
 
         raise ValueError(f"Rule for column '{column_name}' must specify either 'expression' or 'call_function'.")
+
+    @classmethod
+    def build_join_clause(cls, join_cfg: Dict[str, Any]) -> str:
+        """Constructs SQL JOIN clause with catalog support and optional BROADCAST hint."""
+        tbl_meta = join_cfg.get("table", {})
+        
+        # Support both dict and full string table names
+        if isinstance(tbl_meta, dict):
+            catalog = tbl_meta.get("catalog")
+            schema = tbl_meta.get("schema")
+            tbl_name = tbl_meta.get("table")
+            
+            full_table_path = ".".join(filter(None, [catalog, schema, tbl_name]))
+        else:
+            full_table_path = str(tbl_meta)
+
+        alias = join_cfg.get("alias", "").strip()
+        alias_str = f" AS `{alias}`" if alias else ""
+        how = join_cfg.get("how", "left").upper()
+        on_clause = Helper.clean_multiline_sql(join_cfg.get("on", ""))
+
+        if not on_clause:
+            raise ValueError(f"[Transformation Error] Join clause missing 'on' condition for table '{full_table_path}'")
+
+        # Handle Broadcast Hint
+        should_broadcast = join_cfg.get("broadcast", False)
+        broadcast_hint = "/*+ BROADCAST */ " if should_broadcast else ""
+
+        # Optional Join Filter Condition
+        join_filter = join_cfg.get("filter")
+        if join_filter:
+            cleaned_filter = Helper.clean_multiline_sql(join_filter)
+            on_clause = f"({on_clause}) AND ({cleaned_filter})"
+
+        return f"{how} JOIN {broadcast_hint}{full_table_path}{alias_str} ON {on_clause}"
