@@ -7,7 +7,7 @@ from typing import Dict, Any
 
 from yamlpipe.parser.transformation_parser import TransformationParser
 from yamlpipe.parser.quality_checks_parser import QualityChecksParser
-from yamlpipe.core.variables_manager import VariablesManager
+from yamlpipe.core.vars_manager import VariablesManager
 
 logger = logging.getLogger("CacheManager")
 
