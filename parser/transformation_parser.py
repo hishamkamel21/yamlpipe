@@ -63,20 +63,22 @@ class TransformationParser:
                     logger.warning(f"Skipping non-dict rule in job '{job_name}': {rule}")
                     continue
 
-                # Handle select_the_rest
+                # 1. Handle select_the_rest directive
                 if "select_the_rest" in rule:
                     select_the_rest_config = cls._parse_select_the_rest(rule["select_the_rest"])
                     continue
 
-                # Handle raw 'run' directive (e.g., run: location.*)
+                # 2. Handle raw 'run' directive (e.g., run: location.*)
                 if "run" in rule:
                     run_exprs, parent_cols = cls._parse_run_directive(rule["run"], job_name)
                     exprs.extend(run_exprs)
                     explicitly_handled_cols.update(parent_cols)
                     continue
 
-                # Expand standard rules (handles single 'column' vs multi 'columns')
+                # 3. Expand standard column-based rules (column / columns)
+                rule_expanded = False
                 for expanded_rule, col_name in cls._expand_rule(rule):
+                    rule_expanded = True
                     try:
                         explicitly_handled_cols.add(col_name)
                         expr_str = TransformationRegistry.build_rule_expr(expanded_rule)
@@ -89,6 +91,12 @@ class TransformationParser:
                         raise RuntimeError(
                             f"[TransformationParser Error] Job '{job_name}', Column '{col_name}': {str(e)}"
                         ) from e
+
+                if not rule_expanded:
+                    logger.warning(
+                        f"Rule in job '{job_name}' skipped because it lacks valid target directives "
+                        f"('column', 'columns', 'run', or 'select_the_rest'): {rule}"
+                    )
 
             # Update 'except' list inside select_the_rest to include explicitly handled columns automatically
             if select_the_rest_config and select_the_rest_config.get("enable"):
@@ -114,12 +122,14 @@ class TransformationParser:
     def _parse_run_directive(cls, run_val: Any, job_name: str) -> Tuple[List[str], Set[str]]:
         """
         Parses 'run' directive values (e.g., 'location.*' or list of statements).
+        Takes raw string expressions directly without requiring parameters or aliases.
         Returns a tuple of (expressions, target_columns_to_exclude).
         """
         raw_statements: List[str] = []
 
         if isinstance(run_val, str):
-            raw_statements.append(run_val.strip())
+            if run_val.strip():
+                raw_statements.append(run_val.strip())
         elif isinstance(run_val, list):
             for stmt in run_val:
                 if isinstance(stmt, str) and stmt.strip():
@@ -140,7 +150,7 @@ class TransformationParser:
 
         for stmt in raw_statements:
             run_exprs.append(stmt)
-            # If expanding a struct like "location.*", mark "location" as explicitly handled
+            # If expanding a struct like "location.*", mark parent "location" as explicitly handled
             if ".*" in stmt:
                 parent_struct = stmt.split(".*")[0].strip()
                 if parent_struct:
@@ -183,9 +193,6 @@ class TransformationParser:
                 # Replace ${column}, ${col}, and ${c} placeholders
                 rule_copy = cls._replace_column_placeholders(rule_copy, target_col)
                 yield rule_copy, target_col
-
-        else:
-            logger.warning(f"Rule skipped because it lacks 'column', 'columns', or 'run' targets: {rule}")
 
     @classmethod
     def _replace_column_placeholders(cls, item: Any, column_name: str) -> Any:
