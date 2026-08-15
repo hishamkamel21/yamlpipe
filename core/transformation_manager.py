@@ -21,7 +21,10 @@ class TransformationManager:
         self.df = df
         self.spark = df.sparkSession
         self.main_alias = parsed_config.get("alias") or "main_tbl"
-        self.table_name = Helper.parse_table_name(parsed_config.get("table", "unknown_table"))
+        
+        # Clean table name string (remove special chars)
+        raw_table = parsed_config.get("table", "unknown_table")
+        self.table_name = re.sub(r"[^a-zA-Z0-9_]", "_", Helper.parse_table_name(raw_table))
         self.jobs = parsed_config.get("jobs", {})
 
     def apply_transformations(self) -> DataFrame:
@@ -34,11 +37,13 @@ class TransformationManager:
         job_dfs: Dict[str, DataFrame] = {}
         created_temp_views: List[str] = []
 
-        base_view_name = f"tmp_src_{self.table_name}_{id(self.df)}"
+        # Use clean view names and register under session catalog
+        base_view_name = f"tmp_src_{self.table_name}"
         self.df.createOrReplaceTempView(base_view_name)
         created_temp_views.append(base_view_name)
 
-        current_view_name = base_view_name
+        # Explicitly qualify with session catalog to bypass default workspace catalog searches
+        current_source_sql = f"session.`{base_view_name}`"
         current_df = self.df
         current_alias = self.main_alias
 
@@ -47,21 +52,21 @@ class TransformationManager:
                 source_step = job_meta.get("depend_on")
 
                 if source_step:
-                    source_view = f"tmp_job_{source_step}_{id(self.df)}"
+                    source_view_name = f"tmp_job_{self.table_name}_{source_step}"
+                    source_view = f"session.`{source_view_name}`"
                     source_df = job_dfs[source_step]
                 else:
-                    source_view = current_view_name
+                    source_view = current_source_sql
                     source_df = current_df
 
                 select_exprs: List[str] = list(job_meta.get("exprs", []))
                 joins_meta = job_meta.get("joins", [])
                 join_sql_clauses = [j["sql"] for j in joins_meta if isinstance(j, dict) and "sql" in j]
 
-                # --- Broadcast Hint Logic (Placed directly after SELECT keyword) ---
+                # --- Broadcast Hint Logic ---
                 broadcast_targets = []
                 for j in joins_meta:
                     if isinstance(j, dict) and j.get("broadcast"):
-                        # Target table by alias if present, otherwise by table name
                         target = j.get("alias") or j.get("table")
                         if target:
                             broadcast_targets.append(f"`{target}`" if "`" not in target else target)
@@ -113,7 +118,6 @@ class TransformationManager:
                 select_clause = ",\n    ".join(cleaned_exprs)
 
                 raw_joins_sql = "\n".join(join_sql_clauses) if join_sql_clauses else ""
-                # Strip out any legacy misplaced block comments inside join conditions
                 cleaned_joins_sql = re.sub(r"/\*\+\s*.*?\*/", "", raw_joins_sql)
 
                 # --- Build & Execute SQL ---
@@ -126,17 +130,22 @@ FROM {source_view} AS `{current_alias}`
 
                 step_df = self.spark.sql(sql_query)
 
-                current_view_name = f"tmp_job_{job_name}_{id(self.df)}"
-                step_df.createOrReplaceTempView(current_view_name)
-                created_temp_views.append(current_view_name)
+                job_view_name = f"tmp_job_{self.table_name}_{job_name}"
+                step_df.createOrReplaceTempView(job_view_name)
+                created_temp_views.append(job_view_name)
 
                 job_dfs[job_name] = step_df
                 current_df = step_df
+                current_source_sql = f"session.`{job_view_name}`"
                 current_alias = job_name
 
             logger.info(f"Successfully executed transformation pipeline for '{self.table_name}'.")
             return current_df
 
         finally:
+            # Clean up views safely using session scope
             for view_name in created_temp_views:
-                self.spark.catalog.dropTempView(view_name)
+                try:
+                    self.spark.catalog.dropTempView(view_name)
+                except Exception:
+                    pass
