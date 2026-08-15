@@ -1,6 +1,7 @@
 import logging
 from typing import Dict, Any, List, Set, Tuple, Generator
 from yamlpipe.registry.columns_quality_registry import ColumnQualityRegistry
+from yamlpipe.core.vars_manager import VariablesManager
 
 logger = logging.getLogger("ColumnQualityParser")
 
@@ -11,16 +12,8 @@ class ColumnQualityParser:
     def parse_yaml_checks(cls, yaml_config: Dict[str, Any]) -> Dict[str, Any]:
         """
         Parses the 'columns_checks' section from the YAML config.
-        Supports both traditional Column-First format and Check-First bulk checks format.
-
-        Returns:
-            dict: {
-                "columns_checks": {
-                    "error_expr": ["CASE WHEN ... THEN array(...) ELSE array() END", ...],
-                    "warn_expr": ["CASE WHEN ... THEN array(...) ELSE array() END", ...]
-                },
-                "registered_error_suffixes": ["NULL_ERROR", "REGEX_ERROR", ...]
-            }
+        Supports both Column-First and Check-First formats with structural 
+        variable restrictions.
         """
         columns_checks_config = yaml_config.get("columns_checks", [])
 
@@ -42,10 +35,8 @@ class ColumnQualityParser:
                 logger.warning(f"Skipping invalid column entry: {col_entry}")
                 continue
 
-            # Process all (check, column) pairs derived from the entry
             for check, column_name in cls._for_each_column(col_entry):
                 try:
-                    # Router returns sql_expr, severity, and error suffix
                     sql_expr, severity, suffix = ColumnQualityRegistry.router(check, column_name)
                     cleaned_sql = sql_expr.strip()
 
@@ -63,7 +54,7 @@ class ColumnQualityParser:
                         warn_expressions.append(cleaned_sql)
 
                 except Exception as e:
-                    check_identifier = check.get('check_type') or check.get('type') or 'unknown'
+                    check_identifier = check.get("check_type") or check.get("type") or "unknown"
                     logger.error(
                         f"Failed to parse check '{check_identifier}' for column '{column_name}': {str(e)}"
                     )
@@ -79,42 +70,44 @@ class ColumnQualityParser:
 
     @classmethod
     def _for_each_column(cls, entry: Dict[str, Any]) -> Generator[Tuple[Dict[str, Any], str], None, None]:
-        """
-        Normalizes both YAML syntax structures into (check_dict, column_name) pairs.
-
-        1. Column-First Format:
-           - column: customer_id
-             checks:
-               - check_type: not_null
-                 severity: error
-
-        2. Check-First Format:
-           - check_type: not_null  # or type: not_null
-             severity: error
-             columns:
-               - customer_id
-               - age
-        """
         column_name = entry.get("column")
         check_type = entry.get("check_type") or entry.get("type")
 
-        # Format 1: Column-First syntax
+        # Column-First Format validation
         if column_name:
+            if VariablesManager.is_var(column_name):
+                raise ValueError(f"Column-First format cannot use variables for 'column' name: '{column_name}'")
+
             checks = entry.get("checks", [])
             for check in checks:
-                if isinstance(check, dict):
-                    yield check, column_name
-                else:
+                if not isinstance(check, dict):
                     logger.warning(f"Skipping invalid check structure under column '{column_name}': {check}")
+                    continue
 
-        # Format 2: Check-First syntax
+                sub_check_type = check.get("check_type") or check.get("type")
+                sub_severity = check.get("severity")
+
+                if VariablesManager.is_var(sub_check_type):
+                    raise ValueError(f"Check type inside Column-First format cannot be a variable: '{sub_check_type}'")
+                if VariablesManager.is_var(sub_severity):
+                    raise ValueError(f"Severity inside Column-First format cannot be a variable: '{sub_severity}'")
+
+                yield check, column_name
+
+        # Check-First Format validation
         elif check_type:
+            if VariablesManager.is_var(check_type):
+                raise ValueError(f"Check-First format cannot use variables for 'check_type': '{check_type}'")
+
+            severity = entry.get("severity")
+            if VariablesManager.is_var(severity):
+                raise ValueError(f"Check-First format cannot use variables for 'severity': '{severity}'")
+
             target_columns = entry.get("columns", [])
             if not isinstance(target_columns, list) or not target_columns:
                 logger.warning(f"Check-First entry for '{check_type}' missing 'columns' list.")
                 return
 
-            # Extract check payload without the 'columns' key to avoid router pollution
             check_payload = {k: v for k, v in entry.items() if k != "columns"}
 
             for col in target_columns:

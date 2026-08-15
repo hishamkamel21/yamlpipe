@@ -13,7 +13,6 @@ class Getter:
     def _find_project_root(explicit_project_dir: Optional[str] = None) -> str:
         cwd = os.path.abspath(os.getcwd())
 
-        # Step 1: Handle explicit project directory override
         if explicit_project_dir:
             resolved_path = (
                 explicit_project_dir
@@ -29,7 +28,6 @@ class Getter:
             else:
                 raise FileNotFoundError(f"Specified project directory does not exist: {resolved_path}")
 
-        # Step 2: Standard Upward Search
         current_dir = cwd
         while True:
             candidate_config = os.path.join(current_dir, "project.yml")
@@ -47,7 +45,6 @@ class Getter:
                 break
             current_dir = parent_dir
 
-        # Step 3: Dynamic Downward Search
         try:
             subdirs = [
                 os.path.join(cwd, d) for d in os.listdir(cwd) 
@@ -75,7 +72,6 @@ class Getter:
                 raise e
             logger.debug(f"Subdirectory search skipped: {e}")
 
-        # Step 4: Fallback to CWD
         return cwd
 
     @classmethod
@@ -99,5 +95,17 @@ class Getter:
         return CacheManager.get_or_compile(
             project_root=project_root,
             subfolder="transformation_rules",
+            selector=clean_selector
+        )
+
+    @classmethod
+    def get_vars(cls, selector: str, project_dir: Optional[str] = None) -> Dict[str, Any]:
+        """Loads compiled/cached variables configuration as parsed JSON dict."""
+        project_root = cls._find_project_root(explicit_project_dir=project_dir)
+        clean_selector = selector.rsplit(".", 1)[0] if selector.endswith((".yaml", ".yml")) else selector
+
+        return CacheManager.get_or_compile(
+            project_root=project_root,
+            subfolder="vars",
             selector=clean_selector
         )

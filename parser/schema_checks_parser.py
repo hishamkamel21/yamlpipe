@@ -1,7 +1,6 @@
-import logging
-from typing import Dict, Any, List
+from typing import Dict, Any
+from yamlpipe.core.vars_manager import VariablesManager
 
-logger = logging.getLogger("SchemaQualityParser")
 
 
 class SchemaQualityParser:
@@ -10,25 +9,17 @@ class SchemaQualityParser:
     def parse_yaml_checks(cls, yaml_config: Dict[str, Any]) -> Dict[str, Any]:
         """
         Parses the 'schema_checks' section from the YAML config.
-        Passes the YAML objects directly as-is without modification.
-
-        Returns:
-            dict: {
-                "schema_checks": [
-                    {
-                        "check_type": "required_missing",
-                        "columns": ["transaction_id", ...]
-                    },
-                    ...
-                ]
-            }
         """
         schema_checks_config = yaml_config.get("schema_checks", [])
 
         if not schema_checks_config:
             return {"schema_checks": []}
 
-        # Return the exact list of schema check objects directly from YAML
+        for check in schema_checks_config:
+            check_type = check.get("check_type") or check.get("type")
+            if VariablesManager.is_var(check_type):
+                raise ValueError(f"Schema check type cannot be a variable placeholder: '{check_type}'")
+
         return {
             "schema_checks": schema_checks_config
         }

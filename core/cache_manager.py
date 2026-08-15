@@ -3,10 +3,11 @@ import json
 import hashlib
 import yaml
 import logging
-from typing import Dict, Any, Tuple
+from typing import Dict, Any
 
 from yamlpipe.parser.transformation_parser import TransformationParser
 from yamlpipe.parser.quality_checks_parser import QualityChecksParser
+from yamlpipe.core.variables_manager import VariablesManager
 
 logger = logging.getLogger("CacheManager")
 
@@ -26,17 +27,17 @@ class CacheManager:
     def _load_hashes(hash_file_path: str) -> Dict[str, Any]:
         """Reads parsed_hash.yml cleanly."""
         if not os.path.exists(hash_file_path):
-            return {"transformation_rules": {}, "quality_gate": {}}
+            return {"transformation_rules": {}, "quality_gate": {}, "vars": {}}
         try:
             with open(hash_file_path, "r", encoding="utf-8") as f:
                 content = yaml.safe_load(f) or {}
-                # Ensure base keys exist
                 content.setdefault("transformation_rules", {})
                 content.setdefault("quality_gate", {})
+                content.setdefault("vars", {})
                 return content
         except Exception as e:
             logger.warning(f"Could not read hash file at {hash_file_path}, resetting cache index. Error: {e}")
-            return {"transformation_rules": {}, "quality_gate": {}}
+            return {"transformation_rules": {}, "quality_gate": {}, "vars": {}}
 
     @staticmethod
     def _save_hashes(hash_file_path: str, hash_data: Dict[str, Any]) -> None:
@@ -59,10 +60,9 @@ class CacheManager:
         
         Args:
             project_root: Absolute path to project root.
-            subfolder: 'transformation_rules' or 'quality_gate'.
-            selector: Clean config name without extension (e.g., 'customer_checks').
+            subfolder: 'transformation_rules', 'quality_gate', or 'vars'.
+            selector: Clean config name without extension (e.g., 'customers').
         """
-        # 1. Resolve Path Directories
         raw_yaml_path = cls._resolve_yaml_file(project_root, subfolder, selector)
         parsed_dir = os.path.join(project_root, "parsed", subfolder)
         os.makedirs(parsed_dir, exist_ok=True)
@@ -70,12 +70,11 @@ class CacheManager:
         json_cache_path = os.path.join(parsed_dir, f"{selector}.json")
         hash_file_path = os.path.join(project_root, "parsed", "parsed_hash.yml")
 
-        # 2. Check File Hashes
         current_hash = cls._compute_md5(raw_yaml_path)
         all_hashes = cls._load_hashes(hash_file_path)
         cached_hash = all_hashes.get(subfolder, {}).get(selector)
 
-        # 3. Cache HIT: Return cached JSON directly
+        # Cache HIT: Return compiled JSON directly
         if cached_hash == current_hash and os.path.exists(json_cache_path):
             logger.info(f"Cache HIT: Returning compiled JSON for '{subfolder}/{selector}'")
             try:
@@ -84,25 +83,31 @@ class CacheManager:
             except Exception as e:
                 logger.warning(f"Corrupted cache JSON detected at '{json_cache_path}'. Recompiling... Error: {e}")
 
-        # 4. Cache MISS: Parse raw YAML -> Compile -> Cache JSON -> Update Hashes
+        # Cache MISS: Parse raw YAML -> Resolve Vars -> Compile -> Cache JSON
         logger.info(f"Cache MISS: Compiling YAML rule '{subfolder}/{selector}'...")
 
         with open(raw_yaml_path, "r", encoding="utf-8") as f:
             raw_config = yaml.safe_load(f) or {}
 
-        # Delegate parsing based on subfolder type
-        if subfolder == "transformation_rules":
+        # Resolve variables if parsing transformation or quality rules
+        if subfolder in ("transformation_rules", "quality_gate"):
+            raw_config = VariablesManager.parse_value(raw_config, project_root)
+
+        # Delegate parsing
+        if subfolder == "vars":
+            compiled_result = raw_config
+        elif subfolder == "transformation_rules":
             compiled_result = TransformationParser.parse(raw_config)
         elif subfolder == "quality_gate":
             compiled_result = QualityChecksParser.parse_quality_checks(raw_config)
         else:
             raise ValueError(f"Unsupported rule type subfolder: '{subfolder}'")
 
-        # Write Parsed Output to JSON
+        # Write Parsed Output to JSON Cache
         with open(json_cache_path, "w", encoding="utf-8") as f:
             json.dump(compiled_result, f, indent=4, ensure_ascii=False)
 
-        # Update and persist hash registry
+        # Update hash registry
         if subfolder not in all_hashes:
             all_hashes[subfolder] = {}
         all_hashes[subfolder][selector] = current_hash
@@ -113,9 +118,14 @@ class CacheManager:
 
     @staticmethod
     def _resolve_yaml_file(project_root: str, subfolder: str, selector: str) -> str:
-        """Finds raw YAML file (.yaml or .yml) inside source configs."""
+        """Finds raw YAML file (.yaml or .yml) inside source configs or vars."""
         clean_selector = selector.rsplit(".", 1)[0] if selector.endswith((".yaml", ".yml")) else selector
-        target_dir = os.path.join(project_root, "yaml_configs", subfolder)
+        
+        target_dir = (
+            os.path.join(project_root, "vars")
+            if subfolder == "vars"
+            else os.path.join(project_root, "yaml_configs", subfolder)
+        )
 
         candidates = [
             os.path.join(target_dir, f"{clean_selector}.yaml"),

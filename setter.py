@@ -8,7 +8,7 @@ logger = logging.getLogger("ProjectSetter")
 def set_project(project_dir: str = ".") -> str:
     """
     Creates project directory structure including raw YAML configs, 
-    custom modules, and the target 'parsed' compilation cache directory.
+    custom modules, variable definitions, and compilation cache directories.
     """
     try:
         target_dir = os.path.abspath(project_dir)
@@ -19,11 +19,13 @@ def set_project(project_dir: str = ".") -> str:
             os.path.join(target_dir, "custom_checks"),
             os.path.join(target_dir, "functions"),
             os.path.join(target_dir, "pipeline"),
+            os.path.join(target_dir, "vars"),
             os.path.join(target_dir, "yaml_configs", "transformation_rules"),
             os.path.join(target_dir, "yaml_configs", "quality_gate"),
             # Dynamic Compilation Cache Folders
             os.path.join(target_dir, "parsed", "transformation_rules"),
             os.path.join(target_dir, "parsed", "quality_gate"),
+            os.path.join(target_dir, "parsed", "vars"),
         ]
 
         for folder in folders:

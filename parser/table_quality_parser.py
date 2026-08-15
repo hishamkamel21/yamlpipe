@@ -1,13 +1,13 @@
 import uuid
 from typing import Dict, Any, List
 from yamlpipe.registry.table_quality_checks import TableQualityRegistry
+from yamlpipe.core.vars_manager import VariablesManager
 
 
 class TableQualityParser:
 
     @classmethod
     def parse_yaml_checks(cls, yaml_config: Dict[str, Any]) -> Dict[str, Any]:
-        # Fallback to check 'table_checks' if 'checks' key is not found
         checks = yaml_config.get("table_checks", yaml_config.get("checks", []))
 
         if not checks:
@@ -22,8 +22,10 @@ class TableQualityParser:
         temp_views_to_create: List[Dict[str, Any]] = []
 
         for check in checks:
-            # Fallback to 'type' if 'check_type' is absent in the check dictionary
             check_type = str(check.get("check_type") or check.get("type") or "").strip().lower()
+
+            if VariablesManager.is_var(check_type):
+                raise ValueError(f"Table check type cannot be a variable placeholder: '{check_type}'")
 
             if check_type == "duplicate":
                 expr, on_split_keep, is_freshness = TableQualityRegistry.build_duplicate_expr(check)
@@ -63,3 +65,5 @@ class TableQualityParser:
                 "temp_views_to_create": temp_views_to_create
             }
         }
+
+
