@@ -2,6 +2,7 @@ import logging
 import re
 from typing import Dict, Any, List, Set
 from pyspark.sql import DataFrame
+import pyspark.sql.functions as F
 
 from yamlpipe.utility.helper import Helper
 
@@ -24,184 +25,122 @@ class TransformationManager:
 
         raw_table = parsed_config.get("table", "unknown_table")
         self.table_name = re.sub(r"[^a-zA-Z0-9_]", "_", Helper.parse_table_name(raw_table))
-        self.jobs = parsed_config.get("jobs", {})
-        self.created_temp_views: List[str] = []
 
     def apply_transformations(self) -> DataFrame:
-        if not self.jobs:
+        jobs = self.parsed_config.get("job", {})
+        if not jobs:
             logger.warning(f"No transformation jobs configured for table '{self.table_name}'. Returning original DataFrame.")
             return self.df
 
-        logger.info(f"Applying SQL transformation pipeline for table '{self.table_name}'...")
+        # Extract primary job definition
+        job_meta = jobs.get("base") or next(iter(jobs.values()))
+        
+        logger.info(f"Applying DataFrame transformations for table '{self.table_name}'...")
 
-        # Register root source temp view
-        base_view_name = f"tmp_src_{self.table_name}"
-        self.df.createOrReplaceTempView(base_view_name)
-        self.created_temp_views.append(base_view_name)
+        current_df = self.df.alias(self.main_alias)
 
-        current_df = self.df
-        current_source_view = base_view_name
-        job_dfs: Dict[str, DataFrame] = {}
+        # STAGE 1: EXECUTE JOINS
+        joins_meta = job_meta.get("joins", [])
+        if joins_meta:
+            current_df = self._apply_joins(current_df, joins_meta)
 
-        for job_name, job_meta in self.jobs.items():
-            clean_job_name = re.sub(r"[^a-zA-Z0-9_]", "_", str(job_name))
-            
-            source_step = job_meta.get("depend_on")
-            if source_step:
-                clean_step_name = re.sub(r"[^a-zA-Z0-9_]", "_", str(source_step))
-                source_view = f"tmp_job_{self.table_name}_{clean_step_name}"
-                source_df = job_dfs[source_step]
-            else:
-                source_view = current_source_view
-                source_df = current_df
+        # STAGE 2: APPLY EXPRESSIONS & PROJECTIONS
+        current_df = self._apply_projections(current_df, job_meta)
 
-            joins_meta = job_meta.get("joins", [])
-
-            # =================================================================
-            # STAGE 1: EXECUTE JOINS FIRST
-            # =================================================================
-            if joins_meta:
-                join_stage_view = f"tmp_join_stage_{self.table_name}_{clean_job_name}"
-                join_df = self._build_and_run_joins(
-                    source_view=source_view,
-                    source_df=source_df,
-                    joins_meta=joins_meta
-                )
-                join_df.createOrReplaceTempView(join_stage_view)
-                self.created_temp_views.append(join_stage_view)
-                
-                eval_view = join_stage_view
-                eval_df = join_df
-            else:
-                eval_view = source_view
-                eval_df = source_df
-
-            # =================================================================
-            # STAGE 2: BUILD SELECT PROJECTIONS & SELECT_THE_REST
-            # =================================================================
-            step_df = self._build_and_run_projections(
-                eval_view=eval_view,
-                eval_df=eval_df,
-                job_meta=job_meta
-            )
-
-            job_view_name = f"tmp_job_{self.table_name}_{clean_job_name}"
-            step_df.createOrReplaceTempView(job_view_name)
-            self.created_temp_views.append(job_view_name)
-
-            job_dfs[job_name] = step_df
-            current_df = step_df
-            current_source_view = job_view_name
-
-        logger.info(f"Successfully executed transformation pipeline for '{self.table_name}'.")
+        logger.info(f"Successfully applied transformations for '{self.table_name}'.")
         return current_df
 
-    def _build_and_run_joins(
-        self, 
-        source_view: str, 
-        source_df: DataFrame, 
-        joins_meta: List[Dict[str, Any]]
-    ) -> DataFrame:
-        """Runs joins and flattens base table and joined columns into a single relation."""
-        broadcast_targets = []
-        join_sql_clauses = []
-
+    def _apply_joins(self, df: DataFrame, joins_meta: List[Dict[str, Any]]) -> DataFrame:
+        """Executes DataFrame joins using PySpark API based on join configuration metadata."""
         for j in joins_meta:
             if not isinstance(j, dict):
                 continue
 
-            tbl_alias = j.get("alias") or j.get("table")
-            if j.get("broadcast") and tbl_alias:
-                broadcast_targets.append(f"`{tbl_alias}`")
+            target_table = j.get("table")
+            tbl_alias = j.get("alias") or target_table
+            how = j.get("how", "left")
 
-            if j.get("sql"):
-                join_sql_clauses.append(j["sql"])
+            # Load target table relation
+            right_df = self.spark.table(target_table)
+            if tbl_alias:
+                right_df = right_df.alias(tbl_alias)
 
-        hint_clause = f"/*+ BROADCAST({', '.join(broadcast_targets)}) */ " if broadcast_targets else ""
+            # Apply Broadcast Hint if enabled
+            if j.get("broadcast"):
+                right_df = F.broadcast(right_df)
 
-        # Select all columns from main table and joined tables
-        select_clause = f"`{self.main_alias}`.*"
-        for j in joins_meta:
-            if isinstance(j, dict):
-                tbl_alias = j.get("alias") or j.get("table")
-                if tbl_alias:
-                    select_clause += f", `{tbl_alias}`.*"
+            # Parse Join Condition Clause
+            sql_clause = j.get("sql", "")
+            on_clause = j.get("on_clause")
 
-        join_sql = "\n".join(join_sql_clauses)
-        sql_query = f"SELECT {hint_clause} {select_clause} FROM `{source_view}` AS `{self.main_alias}` {join_sql}".strip()
+            if not on_clause and " ON " in sql_clause.upper():
+                on_clause = re.split(r"\s+ON\s+", sql_clause, flags=re.IGNORECASE)[-1]
 
-        logger.debug(f"Executing Join Stage SQL:\n{sql_query}")
-        return self.spark.sql(sql_query)
+            if on_clause:
+                join_condition = F.expr(on_clause)
+                df = df.join(right_df, on=join_condition, how=how)
+            else:
+                df = df.join(right_df, how=how)
 
-    def _build_and_run_projections(
-        self, 
-        eval_view: str, 
-        eval_df: DataFrame, 
-        job_meta: Dict[str, Any]
-    ) -> DataFrame:
-        """Processes expressions, resolves select_the_rest without alias duplication."""
-        raw_exprs: List[str] = list(job_meta.get("exprs", []))
+        return df
+
+    def _apply_projections(self, df: DataFrame, job_meta: Dict[str, Any]) -> DataFrame:
+        """Applies explicit column rules, star expansions, and select_the_rest pruning."""
+        raw_exprs: List[str] = job_meta.get("exprs", [])
         explicit_handled_raw = job_meta.get("explicitly_handled_cols", [])
         select_rest_cfg = job_meta.get("select_the_rest", {})
 
-        select_exprs: List[str] = []
-        seen_output_cols: Set[str] = set()
+        processed_columns: Set[str] = set()
 
-        # Normalize explicit handled column names (strips "c.", "s.")
-        handled_cols_clean: Set[str] = {
-            self._normalize_col_name(col) for col in explicit_handled_raw
-        }
-
-        # 1. Process explicit SQL expressions
-        for expr in raw_exprs:
-            if not isinstance(expr, str):
+        # 1. Process Explicit Expressions and Structural Operations
+        for expr_str in raw_exprs:
+            if not isinstance(expr_str, str):
                 continue
-            
-            clean_expr = expr.strip().rstrip(",")
-            select_exprs.append(clean_expr)
 
-            # Extract output alias (e.g. 'AS `customer_id`' -> 'customer_id')
-            match = re.search(r"AS\s+[`]?([a-zA-Z0-9_]+)[`]?$", clean_expr, re.IGNORECASE)
-            if match:
-                col_alias = match.group(1)
-                seen_output_cols.add(self._normalize_col_name(col_alias))
+            clean_expr = expr_str.strip().rstrip(",")
 
-        # Merge handled columns into tracked output columns
-        seen_output_cols.update(handled_cols_clean)
+            # Handle struct or table expansion (e.g., location.*)
+            if clean_expr.endswith(".*"):
+                col_prefix = clean_expr[:-2]
+                if col_prefix in df.columns:
+                    for field in df.schema[col_prefix].dataType.names:
+                        out_col = f"{col_prefix}_{field}"
+                        df = df.withColumn(out_col, F.col(f"`{col_prefix}`.{field}"))
+                        processed_columns.add(out_col)
+                continue
 
-        # 2. Process select_the_rest safely against the evaluated DataFrame
+            # Handle Expressions with Aliases (e.g., expr AS alias)
+            alias_match = re.search(r"^(.*?)\s+AS\s+[`]?([a-zA-Z0-9_]+)[`]?$", clean_expr, re.IGNORECASE | re.DOTALL)
+            if alias_match:
+                sql_expression, target_col = alias_match.group(1).strip(), alias_match.group(2).strip()
+                df = df.withColumn(target_col, F.expr(sql_expression))
+                processed_columns.add(target_col)
+            else:
+                # Direct SQL Select Expression fallback
+                col_name = self._normalize_col_name(clean_expr)
+                df = df.withColumn(col_name, F.expr(clean_expr))
+                processed_columns.add(col_name)
+
+        # 2. Process select_the_rest Exclusions
         if select_rest_cfg and select_rest_cfg.get("enable"):
             raw_except = select_rest_cfg.get("except", [])
             
-            # Normalize except list
-            except_clean: Set[str] = {
-                self._normalize_col_name(exc) for exc in raw_except
+            # Combine 'except' fields and explicit output columns into exclusion set
+            cols_to_drop: Set[str] = {
+                self._normalize_col_name(c) for c in raw_except + explicit_handled_raw
             }
 
-            for col in eval_df.columns:
-                normalized_col = self._normalize_col_name(col)
+            # Retain newly created/processed columns
+            cols_to_drop = cols_to_drop - processed_columns
 
-                # Include column ONLY if it's not excluded and not explicitly mapped already
-                if normalized_col not in except_clean and normalized_col not in seen_output_cols:
-                    select_exprs.append(f"`{col}`")
-                    seen_output_cols.add(normalized_col)
+            existing_cols_to_drop = [c for c in df.columns if c in cols_to_drop or self._normalize_col_name(c) in cols_to_drop]
+            
+            if existing_cols_to_drop:
+                df = df.drop(*existing_cols_to_drop)
 
-        select_clause = ",\n    ".join(select_exprs) if select_exprs else "*"
-        sql_query = f"SELECT\n    {select_clause}\nFROM `{eval_view}`".strip()
-
-        logger.debug(f"Executing Projection Stage SQL:\n{sql_query}")
-        return self.spark.sql(sql_query)
+        return df
 
     def _normalize_col_name(self, col_ref: str) -> str:
-        """Extracts simple column identifier without table prefixes or backticks."""
+        """Extracts column identifier excluding alias prefixes or backticks."""
         clean = col_ref.replace("`", "").strip()
         return clean.split(".")[-1]
-
-    def cleanup(self):
-        """Removes registered session views from Spark catalog."""
-        for view_name in self.created_temp_views:
-            try:
-                self.spark.catalog.dropTempView(view_name)
-            except Exception as e:
-                logger.debug(f"Failed to drop temp view {view_name}: {e}")
-        self.created_temp_views.clear()
