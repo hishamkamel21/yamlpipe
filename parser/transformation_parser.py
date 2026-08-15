@@ -1,6 +1,6 @@
 import logging
 import re
-import copy  # <--- Added missing import
+import copy
 from typing import Dict, Any, List, Set, Tuple, Generator
 from yamlpipe.registry.transformation_registry import TransformationRegistry
 from yamlpipe.utility.helper import Helper
@@ -10,7 +10,6 @@ logger = logging.getLogger("TransformationParser")
 
 class TransformationParser:
 
-    # Match explicit column variables: ${col} or ${column}
     PLACEHOLDER_PATTERN = re.compile(r"\$\{(column|col)\}", re.IGNORECASE)
 
     @classmethod
@@ -46,7 +45,6 @@ class TransformationParser:
 
             source_step = job_details.get("depend_on")
 
-            # Validate Dependency Chain
             if idx > 0:
                 if not source_step:
                     raise ValueError(
@@ -67,11 +65,14 @@ class TransformationParser:
             if isinstance(joins_list, list):
                 for join_cfg in joins_list:
                     if isinstance(join_cfg, dict):
-                        join_sql = TransformationRegistry.build_join_clause(join_cfg)
+                        clean_join_cfg = {str(k).replace('\xa0', '').strip(): v for k, v in join_cfg.items()}
+
+                        join_sql = TransformationRegistry.build_join_clause(clean_join_cfg)
                         parsed_joins.append({
                             "sql": join_sql,
-                            "table": join_cfg.get("table"),
-                            "alias": join_cfg.get("alias")
+                            "table": clean_join_cfg.get("table"),
+                            "alias": clean_join_cfg.get("alias"),
+                            "broadcast": bool(clean_join_cfg.get("broadcast", False))
                         })
 
             # Parse Rules
@@ -150,7 +151,6 @@ class TransformationParser:
             cols_to_process.extend([str(c).strip() for c in multi_cols if c and str(c).strip()])
 
         for col in cols_to_process:
-            # Format alias prefixing
             qualified_col = f"{table_alias}.{col}" if table_alias and not col.startswith(f"{table_alias}.") else col
 
             rule_copy = copy.deepcopy(rule)

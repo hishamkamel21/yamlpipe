@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Dict, Any, List
 from pyspark.sql import DataFrame
 
@@ -56,12 +57,23 @@ class TransformationManager:
                 joins_meta = job_meta.get("joins", [])
                 join_sql_clauses = [j["sql"] for j in joins_meta if isinstance(j, dict) and "sql" in j]
 
-                # --- 1. Handle select_the_rest (Includes Main + Joined Tables) ---
+                # --- Broadcast Hint Logic (Placed directly after SELECT keyword) ---
+                broadcast_targets = []
+                for j in joins_meta:
+                    if isinstance(j, dict) and j.get("broadcast"):
+                        # Target table by alias if present, otherwise by table name
+                        target = j.get("alias") or j.get("table")
+                        if target:
+                            broadcast_targets.append(f"`{target}`" if "`" not in target else target)
+
+                hint_clause = f"/*+ BROADCAST({', '.join(broadcast_targets)}) */ " if broadcast_targets else ""
+
+                # --- Handle select_the_rest ---
                 select_rest_cfg = job_meta.get("select_the_rest", {})
                 if select_rest_cfg and select_rest_cfg.get("enable"):
                     excluded_cols = set(select_rest_cfg.get("except", []))
 
-                    # أ) أخذ باقي أعمدة الجدول الرئيسي
+                    # Main table rest
                     main_rest = [
                         f"`{current_alias}`.`{c}` AS `{c}`"
                         for c in source_df.columns
@@ -69,7 +81,7 @@ class TransformationManager:
                     ]
                     select_exprs.extend(main_rest)
 
-                    # ب) أخذ باقي أعمدة الجداول المضمومة (Joined Tables) تلقائياً
+                    # Joined tables rest
                     if select_rest_cfg.get("include_joined_tables", True) and joins_meta:
                         for join_item in joins_meta:
                             tbl_name = join_item.get("table")
@@ -84,30 +96,31 @@ class TransformationManager:
                                 ]
                                 select_exprs.extend(joined_rest)
 
-                # --- 2. Clean & Deduplicate SELECT Expressions to prevent Syntax Errors ---
+                # --- Clean & Deduplicate SELECT Expressions ---
                 cleaned_exprs = []
                 seen_exprs = set()
 
                 for expr in select_exprs:
                     if isinstance(expr, str):
-                        # تنظيف الفواصل المسربة في النهاية
                         clean_e = expr.strip().rstrip(",")
                         if clean_e and clean_e not in seen_exprs:
                             cleaned_exprs.append(clean_e)
                             seen_exprs.add(clean_e)
 
-                # حماية: إذا كانت القائمة فارغة نهائياً، نختار كل أعمدة الجدول الأساسي
                 if not cleaned_exprs:
                     cleaned_exprs = [f"`{current_alias}`.*"]
 
                 select_clause = ",\n    ".join(cleaned_exprs)
-                joins_sql = "\n".join(join_sql_clauses) if join_sql_clauses else ""
 
-                # --- 3. Build & Execute SQL Statement ---
-                sql_query = f"""SELECT
+                raw_joins_sql = "\n".join(join_sql_clauses) if join_sql_clauses else ""
+                # Strip out any legacy misplaced block comments inside join conditions
+                cleaned_joins_sql = re.sub(r"/\*\+\s*.*?\*/", "", raw_joins_sql)
+
+                # --- Build & Execute SQL ---
+                sql_query = f"""SELECT {hint_clause}
     {select_clause}
 FROM {source_view} AS `{current_alias}`
-{joins_sql}""".strip()
+{cleaned_joins_sql}""".strip()
 
                 logger.debug(f"Executing SQL for Job '{job_name}':\n{sql_query}")
 
