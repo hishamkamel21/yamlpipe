@@ -46,9 +46,6 @@ class Helper:
             logger.error(error_msg)
             raise ValueError(error_msg) from e
 
-    import re
-
-class Helper:
     @staticmethod
     def clean_multiline_sql(sql_expr: Any) -> str:
         """
