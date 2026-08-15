@@ -46,16 +46,23 @@ class Helper:
             logger.error(error_msg)
             raise ValueError(error_msg) from e
 
+    import re
+
+class Helper:
     @staticmethod
-    def clean_multiline_sql(sql_expr: str) -> str:
+    def clean_multiline_sql(sql_expr: Any) -> str:
         """
         Cleans and normalizes multiline YAML strings (e.g. from literal block scalar '|')
-        into a single-line or clean Spark SQL expression.
+        into a single-line or clean Spark SQL expression safely.
         """
-        if not sql_expr or not isinstance(sql_expr, str):
-            return sql_expr
+        if sql_expr is None:
+            return ""
         
-        # Replace newlines and multiple whitespaces with a single space
+        if isinstance(sql_expr, list):
+            sql_expr = " AND ".join([str(x) for x in sql_expr if x])
+        elif not isinstance(sql_expr, str):
+            sql_expr = str(sql_expr)
+
         cleaned = re.sub(r'\s+', ' ', sql_expr).strip()
         return cleaned
 
