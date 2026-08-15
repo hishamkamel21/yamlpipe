@@ -22,7 +22,6 @@ class TransformationManager:
         self.spark = df.sparkSession
         self.main_alias = parsed_config.get("alias") or "main_tbl"
         
-        # Clean table name string (remove special chars)
         raw_table = parsed_config.get("table", "unknown_table")
         self.table_name = re.sub(r"[^a-zA-Z0-9_]", "_", Helper.parse_table_name(raw_table))
         self.jobs = parsed_config.get("jobs", {})
@@ -37,13 +36,12 @@ class TransformationManager:
         job_dfs: Dict[str, DataFrame] = {}
         created_temp_views: List[str] = []
 
-        # Use clean view names and register under session catalog
+        # 1. اسم الـ View من غير أي prefixes عشان Spark Connect يفهمه صح
         base_view_name = f"tmp_src_{self.table_name}"
         self.df.createOrReplaceTempView(base_view_name)
         created_temp_views.append(base_view_name)
 
-        # Explicitly qualify with session catalog to bypass default workspace catalog searches
-        current_source_sql = f"session.`{base_view_name}`"
+        current_source_view = f"`{base_view_name}`"
         current_df = self.df
         current_alias = self.main_alias
 
@@ -53,10 +51,10 @@ class TransformationManager:
 
                 if source_step:
                     source_view_name = f"tmp_job_{self.table_name}_{source_step}"
-                    source_view = f"session.`{source_view_name}`"
+                    source_view = f"`{source_view_name}`"
                     source_df = job_dfs[source_step]
                 else:
-                    source_view = current_source_sql
+                    source_view = current_source_view
                     source_df = current_df
 
                 select_exprs: List[str] = list(job_meta.get("exprs", []))
@@ -128,6 +126,7 @@ FROM {source_view} AS `{current_alias}`
 
                 logger.debug(f"Executing SQL for Job '{job_name}':\n{sql_query}")
 
+                # تنفيـذ الـ Query جوة Spark Connect
                 step_df = self.spark.sql(sql_query)
 
                 job_view_name = f"tmp_job_{self.table_name}_{job_name}"
@@ -136,14 +135,14 @@ FROM {source_view} AS `{current_alias}`
 
                 job_dfs[job_name] = step_df
                 current_df = step_df
-                current_source_sql = f"session.`{job_view_name}`"
+                current_source_view = f"`{job_view_name}`"
                 current_alias = job_name
 
             logger.info(f"Successfully executed transformation pipeline for '{self.table_name}'.")
             return current_df
 
         finally:
-            # Clean up views safely using session scope
+            # تنظيف الـ Temp Views من غير ما تضرب لو مش موجودة
             for view_name in created_temp_views:
                 try:
                     self.spark.catalog.dropTempView(view_name)
