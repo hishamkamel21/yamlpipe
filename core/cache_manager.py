@@ -3,7 +3,7 @@ import json
 import hashlib
 import yaml
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from yamlpipe.parser.transformation_parser import TransformationParser
 from yamlpipe.parser.quality_checks_parser import QualityChecksParser
@@ -56,12 +56,7 @@ class CacheManager:
         selector: str
     ) -> Dict[str, Any]:
         """
-        Orchestrates cache validation, static compilation, and JSON cache retrieval.
-        
-        Args:
-            project_root: Absolute path to project root.
-            subfolder: 'transformation_rules', 'quality_gate', or 'vars'.
-            selector: Clean config name without extension (e.g., 'customers').
+        Orchestrates cache validation, dependency graph checks, and dynamic compilation.
         """
         raw_yaml_path = cls._resolve_yaml_file(project_root, subfolder, selector)
         parsed_dir = os.path.join(project_root, "parsed", subfolder)
@@ -74,26 +69,48 @@ class CacheManager:
         all_hashes = cls._load_hashes(hash_file_path)
         cached_hash = all_hashes.get(subfolder, {}).get(selector)
 
-        # Cache HIT: Return compiled JSON directly
+        # 1. Base File Hash Check
         if cached_hash == current_hash and os.path.exists(json_cache_path):
-            logger.info(f"Cache HIT: Returning compiled JSON for '{subfolder}/{selector}'")
             try:
                 with open(json_cache_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    cached_data = json.load(f)
+
+                # 2. Check Variable Dependencies Hash Consistency
+                var_dependencies = cached_data.get("ContainVarsFrom", []) if isinstance(cached_data, dict) else []
+                dependencies_valid = True
+
+                for var_selector in var_dependencies:
+                    var_yaml_path = cls._resolve_yaml_file(project_root, "vars", var_selector)
+                    current_var_hash = cls._compute_md5(var_yaml_path)
+                    cached_var_hash = all_hashes.get("vars", {}).get(var_selector)
+
+                    if current_var_hash != cached_var_hash:
+                        logger.info(
+                            f"Cache MISS: Dependent variable '{var_selector}' changed for '{subfolder}/{selector}'."
+                        )
+                        dependencies_valid = False
+                        break
+
+                if dependencies_valid:
+                    logger.info(f"Cache HIT: Returning compiled JSON for '{subfolder}/{selector}'")
+                    return cached_data
+
             except Exception as e:
                 logger.warning(f"Corrupted cache JSON detected at '{json_cache_path}'. Recompiling... Error: {e}")
 
-        # Cache MISS: Parse raw YAML -> Resolve Vars -> Compile -> Cache JSON
+        # Cache MISS: Reparse and Recompile
         logger.info(f"Cache MISS: Compiling YAML rule '{subfolder}/{selector}'...")
 
         with open(raw_yaml_path, "r", encoding="utf-8") as f:
             raw_config = yaml.safe_load(f) or {}
 
-        # Resolve variables if parsing transformation or quality rules
+        # Resolve variables and track dependencies
+        referenced_vars = []
         if subfolder in ("transformation_rules", "quality_gate"):
-            raw_config = VariablesManager.parse_value(raw_config, project_root)
+            raw_config, referenced_vars_set = VariablesManager.extract_vars_and_parse(raw_config, project_root)
+            referenced_vars = sorted(list(referenced_vars_set))
 
-        # Delegate parsing
+        # Compile Rule via registered Parsers
         if subfolder == "vars":
             compiled_result = raw_config
         elif subfolder == "transformation_rules":
@@ -103,14 +120,30 @@ class CacheManager:
         else:
             raise ValueError(f"Unsupported rule type subfolder: '{subfolder}'")
 
-        # Write Parsed Output to JSON Cache
+        # Inject ContainVarsFrom dependency list into top-level compiled output
+        if subfolder in ("transformation_rules", "quality_gate") and isinstance(compiled_result, dict):
+            compiled_result["ContainVarsFrom"] = referenced_vars
+
+        # Save JSON Cache
         with open(json_cache_path, "w", encoding="utf-8") as f:
             json.dump(compiled_result, f, indent=4, ensure_ascii=False)
 
-        # Update hash registry
+        # Update parsed_hash.yml
         if subfolder not in all_hashes:
             all_hashes[subfolder] = {}
         all_hashes[subfolder][selector] = current_hash
+
+        # Update variable hashes for tracked dependencies
+        if subfolder == "vars":
+            all_hashes["vars"][selector] = current_hash
+        else:
+            for var_selector in referenced_vars:
+                try:
+                    var_yaml_path = cls._resolve_yaml_file(project_root, "vars", var_selector)
+                    all_hashes["vars"][var_selector] = cls._compute_md5(var_yaml_path)
+                except FileNotFoundError:
+                    logger.warning(f"Referenced variable file '{var_selector}' not found on disk.")
+
         cls._save_hashes(hash_file_path, all_hashes)
 
         logger.info(f"Successfully compiled and cached '{selector}' to '{json_cache_path}'")
@@ -118,7 +151,6 @@ class CacheManager:
 
     @staticmethod
     def _resolve_yaml_file(project_root: str, subfolder: str, selector: str) -> str:
-        """Finds raw YAML file (.yaml or .yml) inside source configs or vars."""
         clean_selector = selector.rsplit(".", 1)[0] if selector.endswith((".yaml", ".yml")) else selector
         
         target_dir = (
