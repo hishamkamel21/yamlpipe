@@ -18,7 +18,7 @@ class TransformationParser:
         """
         Parses raw YAML transformation configuration into an intermediate structure.
         Validates job dependency lineage and extracts SQL expressions.
-        Supports single-column and multi-column bulk rule definitions.
+        Supports single-column, multi-column bulk rules, and 'run' directives (e.g., location.*).
         """
         if not isinstance(raw_config, dict):
             raise TypeError(f"[TransformationParser Error] Expected dict, got {type(raw_config).__name__}")
@@ -63,11 +63,19 @@ class TransformationParser:
                     logger.warning(f"Skipping non-dict rule in job '{job_name}': {rule}")
                     continue
 
+                # Handle select_the_rest
                 if "select_the_rest" in rule:
                     select_the_rest_config = cls._parse_select_the_rest(rule["select_the_rest"])
                     continue
 
-                # Expand rules (handles single 'column' vs multi 'columns')
+                # Handle raw 'run' directive (e.g., run: location.*)
+                if "run" in rule:
+                    run_exprs, parent_cols = cls._parse_run_directive(rule["run"], job_name)
+                    exprs.extend(run_exprs)
+                    explicitly_handled_cols.update(parent_cols)
+                    continue
+
+                # Expand standard rules (handles single 'column' vs multi 'columns')
                 for expanded_rule, col_name in cls._expand_rule(rule):
                     try:
                         explicitly_handled_cols.add(col_name)
@@ -101,6 +109,44 @@ class TransformationParser:
             "table": cleaned_table_name,
             "jobs": parsed_jobs
         }
+
+    @classmethod
+    def _parse_run_directive(cls, run_val: Any, job_name: str) -> Tuple[List[str], Set[str]]:
+        """
+        Parses 'run' directive values (e.g., 'location.*' or list of statements).
+        Returns a tuple of (expressions, target_columns_to_exclude).
+        """
+        raw_statements: List[str] = []
+
+        if isinstance(run_val, str):
+            raw_statements.append(run_val.strip())
+        elif isinstance(run_val, list):
+            for stmt in run_val:
+                if isinstance(stmt, str) and stmt.strip():
+                    raw_statements.append(stmt.strip())
+                else:
+                    logger.warning(f"Skipping non-string item in 'run' directive list for job '{job_name}': {stmt}")
+        elif isinstance(run_val, dict):
+            expr = run_val.get("expr") or run_val.get("expression")
+            if expr and isinstance(expr, str):
+                raw_statements.append(expr.strip())
+            else:
+                logger.warning(f"Invalid dict payload in 'run' directive for job '{job_name}': {run_val}")
+        else:
+            raise TypeError(f"[TransformationParser Error] Unsupported type for 'run' in job '{job_name}': {type(run_val)}")
+
+        run_exprs: List[str] = []
+        handled_struct_cols: Set[str] = set()
+
+        for stmt in raw_statements:
+            run_exprs.append(stmt)
+            # If expanding a struct like "location.*", mark "location" as explicitly handled
+            if ".*" in stmt:
+                parent_struct = stmt.split(".*")[0].strip()
+                if parent_struct:
+                    handled_struct_cols.add(parent_struct)
+
+        return run_exprs, handled_struct_cols
 
     @classmethod
     def _expand_rule(cls, rule: Dict[str, Any]) -> Generator[Tuple[Dict[str, Any], str], None, None]:
@@ -139,7 +185,7 @@ class TransformationParser:
                 yield rule_copy, target_col
 
         else:
-            logger.warning(f"Rule skipped because it lacks both 'column' and 'columns' targets: {rule}")
+            logger.warning(f"Rule skipped because it lacks 'column', 'columns', or 'run' targets: {rule}")
 
     @classmethod
     def _replace_column_placeholders(cls, item: Any, column_name: str) -> Any:
