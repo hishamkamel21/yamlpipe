@@ -23,7 +23,10 @@ class SchemaQualityRegistry:
         handlers = {
             "required_missing": cls._handle_required_missing,
             "required_columns": cls._handle_required_missing,
+            "req_columns": cls._handle_required_missing,
             "type_mismatch": cls._handle_type_mismatch,
+            "data_types": cls._handle_type_mismatch,
+            "data_type": cls._handle_type_mismatch,
             "no_duplicate_columns": cls._handle_no_duplicate_columns,
             "no_duplicate": cls._handle_no_duplicate_columns,
             "no_duplicated_columns": cls._handle_no_duplicate_columns,
@@ -105,7 +108,7 @@ class SchemaQualityRegistry:
         if not expected_types:
             return "CAST(ARRAY() AS ARRAY<STRUCT<column:STRING, expected_type:STRING, actual_type:STRING>>)"
 
-        # Normalize existing Spark DataFrame dtypes using DataTypeAlias Enum
+        # Normalize existing Spark DataFrame dtypes
         current_dtypes = {col_name: DataTypeAlias.normalize(dtype) for col_name, dtype in df.dtypes}
         mismatch_structs = []
 
