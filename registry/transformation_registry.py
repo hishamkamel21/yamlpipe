@@ -60,11 +60,23 @@ class TransformationRegistry:
         alias = join_cfg.get("alias", "").strip()
         alias_str = f" AS `{alias}`" if alias else ""
         how = join_cfg.get("how", "left").upper()
-        on_clause = Helper.clean_multiline_sql(join_cfg.get("on", ""))
+        # 1. Fetch raw value and check multiple possible keys ('on', 'on_clause', 'using')
+        raw_on = join_cfg.get("on") or join_cfg.get("on_clause") or join_cfg.get("using")
 
-        if not on_clause:
+        if raw_on is None:
             raise ValueError(f"[Transformation Error] Join clause missing 'on' condition for table '{full_table_path}'")
 
+        # 2. Convert list of conditions to string if passed as a list
+        if isinstance(raw_on, list):
+            raw_on = " AND ".join(raw_on)
+
+        # 3. Clean multiline SQL safely
+        on_clause = Helper.clean_multiline_sql(str(raw_on))
+
+        # 4. Strict emptiness check
+        if not on_clause or not on_clause.strip():
+            raise ValueError(f"[Transformation Error] Join clause missing 'on' condition for table '{full_table_path}'")
+        
         # Handle Broadcast Hint
         should_broadcast = join_cfg.get("broadcast", False)
         broadcast_hint = "/*+ BROADCAST */ " if should_broadcast else ""
