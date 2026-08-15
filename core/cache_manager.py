@@ -8,16 +8,12 @@ import threading
 from typing import Dict, Any, List
 from filelock import FileLock, Timeout
 
-from yamlpipe.parser.transformation_parser import TransformationParser
-from yamlpipe.parser.quality_checks_parser import QualityChecksParser
-from yamlpipe.core.vars_manager import VariablesManager
-
 logger = logging.getLogger("CacheManager")
 
 
 class ReentrantFileLock:
     """
-    Process-safe and Thread-safe Re-entrant File Lock.
+    Process-safe and Thread-safe Re-entrant File Lock keyed by file path.
     Prevents Deadlocks when get_or_compile recurses to fetch dependent variables.
     """
     _thread_local = threading.local()
@@ -31,12 +27,10 @@ class ReentrantFileLock:
         if not hasattr(self._thread_local, "locks"):
             self._thread_local.locks = {}
 
-        # If this thread already acquired this specific lock file, just increment counter
         if self.lock_file_path in self._thread_local.locks:
             self._thread_local.locks[self.lock_file_path] += 1
             return self
 
-        # Acquire inter-process filelock for the first time
         self.lock.acquire(timeout=self.timeout)
         self._thread_local.locks[self.lock_file_path] = 1
         return self
@@ -44,8 +38,6 @@ class ReentrantFileLock:
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.lock_file_path in self._thread_local.locks:
             self._thread_local.locks[self.lock_file_path] -= 1
-            
-            # Release actual lock when outer-most call exits
             if self._thread_local.locks[self.lock_file_path] == 0:
                 del self._thread_local.locks[self.lock_file_path]
                 self.lock.release()
@@ -127,23 +119,36 @@ class CacheManager:
         selector: str
     ) -> Dict[str, Any]:
         """
-        Orchestrates cache validation, dependency graph checks, and dynamic compilation safely under concurrency.
+        Orchestrates cache validation, dependency graph checks, and dynamic compilation using Per-Resource Locks.
         """
+        # Lazy imports inside method if needed to prevent circular import issues
+        from yamlpipe.parser.transformation_parser import TransformationParser
+        from yamlpipe.parser.quality_checks_parser import QualityChecksParser
+        from yamlpipe.core.vars_manager import VariablesManager
+
         raw_yaml_path = cls._resolve_yaml_file(project_root, subfolder, selector)
         parsed_dir = os.path.join(project_root, "parsed", subfolder)
         os.makedirs(parsed_dir, exist_ok=True)
 
         json_cache_path = os.path.join(parsed_dir, f"{selector}.json")
         hash_file_path = os.path.join(project_root, "parsed", "parsed_hash.yml")
-        lock_file_path = os.path.join(project_root, "parsed", ".cache_manager.lock")
+        
+        # Per-Resource Lock file unique to the specific subfolder and selector
+        resource_lock_path = os.path.join(parsed_dir, f".lock_{selector}")
+        # Dedicated lock for atomic updates to the central hash registry
+        global_hash_lock_path = os.path.join(project_root, "parsed", ".hash_registry.lock")
 
-        # Use Reentrant Lock to allow nested variables resolution without Deadlocks
-        lock = ReentrantFileLock(lock_file_path, timeout=30)
+        resource_lock = ReentrantFileLock(resource_lock_path, timeout=30)
+        hash_lock = ReentrantFileLock(global_hash_lock_path, timeout=30)
 
         try:
-            with lock:
+            with resource_lock:
                 current_hash = cls._compute_md5(raw_yaml_path)
-                all_hashes = cls._load_hashes(hash_file_path)
+                
+                # Fetch current hashes safely under global hash lock
+                with hash_lock:
+                    all_hashes = cls._load_hashes(hash_file_path)
+                
                 cached_hash = all_hashes.get(subfolder, {}).get(selector)
 
                 # 1. Base File Hash Check
@@ -218,7 +223,7 @@ class CacheManager:
                 if subfolder in ("transformation_rules", "quality_gate") and isinstance(compiled_result, dict):
                     compiled_result["ContainVarsFrom"] = referenced_vars
 
-                # Save JSON Cache Atomically (Thread & Process Safe)
+                # Save JSON Cache Atomically
                 unique_id = uuid.uuid4().hex
                 temp_json_path = f"{json_cache_path}.tmp.{os.getpid()}_{unique_id}"
 
@@ -236,32 +241,33 @@ class CacheManager:
                         f"[CacheManager Error] Failed to write compiled output JSON to '{json_cache_path}'. Details: {type(e).__name__} - {str(e)}"
                     )
 
-                # Update parsed_hash.yml
-                if subfolder not in all_hashes:
-                    all_hashes[subfolder] = {}
-                all_hashes[subfolder][selector] = current_hash
+                # Atomic Update to Global Hash Registry
+                with hash_lock:
+                    latest_hashes = cls._load_hashes(hash_file_path)
+                    if subfolder not in latest_hashes:
+                        latest_hashes[subfolder] = {}
+                    latest_hashes[subfolder][selector] = current_hash
 
-                # Update variable hashes for tracked dependencies
-                if subfolder == "vars":
-                    all_hashes["vars"][selector] = current_hash
-                else:
-                    for var_selector in referenced_vars:
-                        try:
-                            var_yaml_path = cls._resolve_yaml_file(project_root, "vars", var_selector)
-                            all_hashes["vars"][var_selector] = cls._compute_md5(var_yaml_path)
-                        except FileNotFoundError:
-                            logger.warning(
-                                f"[CacheManager Warning] Referenced variable file '{var_selector}' not found on disk during hash update."
-                            )
+                    if subfolder == "vars":
+                        latest_hashes["vars"][selector] = current_hash
+                    else:
+                        for var_selector in referenced_vars:
+                            try:
+                                var_yaml_path = cls._resolve_yaml_file(project_root, "vars", var_selector)
+                                latest_hashes["vars"][var_selector] = cls._compute_md5(var_yaml_path)
+                            except FileNotFoundError:
+                                logger.warning(
+                                    f"[CacheManager Warning] Referenced variable file '{var_selector}' not found on disk during hash update."
+                                )
 
-                cls._save_hashes_atomic(hash_file_path, all_hashes)
+                    cls._save_hashes_atomic(hash_file_path, latest_hashes)
 
                 logger.info(f"Successfully compiled and cached '{selector}' to '{json_cache_path}'")
                 return compiled_result
 
         except Timeout:
             raise TimeoutError(
-                f"[CacheManager Error] Process timed out waiting for file lock on '{lock_file_path}' while accessing '{subfolder}/{selector}'."
+                f"[CacheManager Error] Process timed out waiting for lock while accessing '{subfolder}/{selector}'."
             )
 
     @staticmethod
