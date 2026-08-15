@@ -1,6 +1,6 @@
-import copy
 import logging
 import re
+import copy  # <--- Added missing import
 from typing import Dict, Any, List, Set, Tuple, Generator
 from yamlpipe.registry.transformation_registry import TransformationRegistry
 from yamlpipe.utility.helper import Helper
@@ -10,7 +10,8 @@ logger = logging.getLogger("TransformationParser")
 
 class TransformationParser:
 
-    PLACEHOLDER_PATTERN = re.compile(r"\$\{(column|col|c)\}", re.IGNORECASE)
+    # Match explicit column variables: ${col} or ${column}
+    PLACEHOLDER_PATTERN = re.compile(r"\$\{(column|col)\}", re.IGNORECASE)
 
     @classmethod
     def parse(cls, raw_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -66,7 +67,6 @@ class TransformationParser:
             if isinstance(joins_list, list):
                 for join_cfg in joins_list:
                     if isinstance(join_cfg, dict):
-                        # نمرر تفاصيل الـ Join كاملة للاستفادة منها في معرفة اسم وتكتيك جدول الـ Join
                         join_sql = TransformationRegistry.build_join_clause(join_cfg)
                         parsed_joins.append({
                             "sql": join_sql,
@@ -90,7 +90,7 @@ class TransformationParser:
                         exprs.extend(run_exprs)
                         continue
 
-                    for expanded_rule, col_name in cls._expand_rule(rule):
+                    for expanded_rule, col_name in cls._expand_rule(rule, main_alias):
                         try:
                             explicitly_handled_cols.add(col_name)
                             expr_str = TransformationRegistry.build_rule_expr(expanded_rule)
@@ -119,7 +119,8 @@ class TransformationParser:
         return {
             "table": cleaned_table_name,
             "alias": main_alias,
-            "jobs": parsed_jobs
+            "jobs": parsed_jobs,
+            "ContainVarsFrom": []
         }
 
     @classmethod
@@ -138,26 +139,25 @@ class TransformationParser:
         return raw_statements
 
     @classmethod
-    def _expand_rule(cls, rule: Dict[str, Any]) -> Generator[Tuple[Dict[str, Any], str], None, None]:
+    def _expand_rule(cls, rule: Dict[str, Any], table_alias: str = "") -> Generator[Tuple[Dict[str, Any], str], None, None]:
         single_col = rule.get("column")
         multi_cols = rule.get("columns")
 
+        cols_to_process = []
         if single_col:
-            target_col = str(single_col).strip()
-            rule_copy = copy.deepcopy(rule)
-            rule_copy = cls._replace_column_placeholders(rule_copy, target_col)
-            yield rule_copy, target_col
-
+            cols_to_process.append(str(single_col).strip())
         elif multi_cols and isinstance(multi_cols, list):
-            for col in multi_cols:
-                if not col or not str(col).strip():
-                    continue
-                target_col = str(col).strip()
-                rule_copy = copy.deepcopy(rule)
-                rule_copy.pop("columns", None)
-                rule_copy["column"] = target_col
-                rule_copy = cls._replace_column_placeholders(rule_copy, target_col)
-                yield rule_copy, target_col
+            cols_to_process.extend([str(c).strip() for c in multi_cols if c and str(c).strip()])
+
+        for col in cols_to_process:
+            # Format alias prefixing
+            qualified_col = f"{table_alias}.{col}" if table_alias and not col.startswith(f"{table_alias}.") else col
+
+            rule_copy = copy.deepcopy(rule)
+            rule_copy.pop("columns", None)
+            rule_copy["column"] = qualified_col
+            rule_copy = cls._replace_column_placeholders(rule_copy, col)
+            yield rule_copy, qualified_col
 
     @classmethod
     def _replace_column_placeholders(cls, item: Any, column_name: str) -> Any:
