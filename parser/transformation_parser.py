@@ -25,6 +25,9 @@ class TransformationParser:
         main_alias = raw_config.get("alias", "main_tbl")
         raw_jobs = raw_config.get("jobs", [])
 
+        if not isinstance(raw_jobs, list):
+            raise TypeError(f"[TransformationParser Error] 'jobs' must be a list, got {type(raw_jobs).__name__}")
+
         parsed_jobs: Dict[str, Dict[str, Any]] = {}
         defined_job_names: Set[str] = set()
 
@@ -33,6 +36,9 @@ class TransformationParser:
                 continue
 
             job_name, job_details = next(iter(job_entry.items()))
+
+            if not isinstance(job_details, dict):
+                raise TypeError(f"[TransformationParser Error] Details for job '{job_name}' must be a dict.")
 
             if job_name in defined_job_names:
                 raise ValueError(f"[TransformationParser Error] Duplicate job name detected: '{job_name}'")
@@ -50,39 +56,50 @@ class TransformationParser:
                         f"[TransformationParser Error] Job '{job_name}' depends on unknown job '{source_step}'."
                     )
 
-            # Parse expressions and Joins
             exprs: List[str] = []
             explicitly_handled_cols: Set[str] = set()
             select_the_rest_config = None
 
             # Parse Joins
-            parsed_joins: List[str] = []
-            for join_cfg in job_details.get("joins", []):
-                parsed_joins.append(TransformationRegistry.build_join_clause(join_cfg))
+            parsed_joins: List[Dict[str, Any]] = []
+            joins_list = job_details.get("joins", [])
+            if isinstance(joins_list, list):
+                for join_cfg in joins_list:
+                    if isinstance(join_cfg, dict):
+                        # نمرر تفاصيل الـ Join كاملة للاستفادة منها في معرفة اسم وتكتيك جدول الـ Join
+                        join_sql = TransformationRegistry.build_join_clause(join_cfg)
+                        parsed_joins.append({
+                            "sql": join_sql,
+                            "table": join_cfg.get("table"),
+                            "alias": join_cfg.get("alias")
+                        })
 
             # Parse Rules
-            for rule in job_details.get("rules", []):
-                if not isinstance(rule, dict):
-                    continue
+            rules_list = job_details.get("rules", [])
+            if isinstance(rules_list, list):
+                for rule in rules_list:
+                    if not isinstance(rule, dict):
+                        continue
 
-                if "select_the_rest" in rule:
-                    select_the_rest_config = cls._parse_select_the_rest(rule["select_the_rest"])
-                    continue
+                    if "select_the_rest" in rule:
+                        select_the_rest_config = cls._parse_select_the_rest(rule["select_the_rest"])
+                        continue
 
-                if "run" in rule:
-                    run_exprs = cls._parse_run_directive(rule["run"], job_name)
-                    exprs.extend(run_exprs)
-                    continue
+                    if "run" in rule:
+                        run_exprs = cls._parse_run_directive(rule["run"], job_name)
+                        exprs.extend(run_exprs)
+                        continue
 
-                for expanded_rule, col_name in cls._expand_rule(rule):
-                    try:
-                        explicitly_handled_cols.add(col_name)
-                        expr_str = TransformationRegistry.build_rule_expr(expanded_rule)
-                        exprs.append(expr_str)
-                    except Exception as e:
-                        raise RuntimeError(
-                            f"[TransformationParser Error] Job '{job_name}', Column '{col_name}': {str(e)}"
-                        ) from e
+                    for expanded_rule, col_name in cls._expand_rule(rule):
+                        try:
+                            explicitly_handled_cols.add(col_name)
+                            expr_str = TransformationRegistry.build_rule_expr(expanded_rule)
+                            if expr_str and expr_str.strip():
+                                exprs.append(expr_str.strip())
+                        except Exception as e:
+                            raise RuntimeError(
+                                f"[TransformationParser Error] Job '{job_name}', Column '{col_name}': {str(e)}"
+                            ) from e
 
             if select_the_rest_config and select_the_rest_config.get("enable"):
                 existing_except = set(select_the_rest_config.get("except", []))
@@ -170,5 +187,5 @@ class TransformationParser:
         return {
             "enable": True,
             "except": except_list,
-            "from_alias": config.get("from_alias")
+            "include_joined_tables": config.get("include_joined_tables", True)
         }
