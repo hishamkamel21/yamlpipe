@@ -4,6 +4,7 @@ import hashlib
 import yaml
 import logging
 import uuid
+import threading
 from typing import Dict, Any, List
 from filelock import FileLock, Timeout
 
@@ -12,6 +13,42 @@ from yamlpipe.parser.quality_checks_parser import QualityChecksParser
 from yamlpipe.core.vars_manager import VariablesManager
 
 logger = logging.getLogger("CacheManager")
+
+
+class ReentrantFileLock:
+    """
+    Process-safe and Thread-safe Re-entrant File Lock.
+    Prevents Deadlocks when get_or_compile recurses to fetch dependent variables.
+    """
+    _thread_local = threading.local()
+
+    def __init__(self, lock_file_path: str, timeout: int = 30):
+        self.lock_file_path = lock_file_path
+        self.timeout = timeout
+        self.lock = FileLock(lock_file_path, timeout=timeout)
+
+    def __enter__(self):
+        if not hasattr(self._thread_local, "locks"):
+            self._thread_local.locks = {}
+
+        # If this thread already acquired this specific lock file, just increment counter
+        if self.lock_file_path in self._thread_local.locks:
+            self._thread_local.locks[self.lock_file_path] += 1
+            return self
+
+        # Acquire inter-process filelock for the first time
+        self.lock.acquire(timeout=self.timeout)
+        self._thread_local.locks[self.lock_file_path] = 1
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.lock_file_path in self._thread_local.locks:
+            self._thread_local.locks[self.lock_file_path] -= 1
+            
+            # Release actual lock when outer-most call exits
+            if self._thread_local.locks[self.lock_file_path] == 0:
+                del self._thread_local.locks[self.lock_file_path]
+                self.lock.release()
 
 
 class CacheManager:
@@ -100,8 +137,8 @@ class CacheManager:
         hash_file_path = os.path.join(project_root, "parsed", "parsed_hash.yml")
         lock_file_path = os.path.join(project_root, "parsed", ".cache_manager.lock")
 
-        # Global Lock to prevent concurrent write collisions across processes/threads
-        lock = FileLock(lock_file_path, timeout=30)
+        # Use Reentrant Lock to allow nested variables resolution without Deadlocks
+        lock = ReentrantFileLock(lock_file_path, timeout=30)
 
         try:
             with lock:
