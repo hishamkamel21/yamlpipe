@@ -70,9 +70,10 @@ class TransformationParser:
 
                 # 2. Handle raw 'run' directive (e.g., run: location.*)
                 if "run" in rule:
-                    run_exprs, parent_cols = cls._parse_run_directive(rule["run"], job_name)
+                    run_exprs = cls._parse_run_directive(rule["run"], job_name)
                     exprs.extend(run_exprs)
-                    explicitly_handled_cols.update(parent_cols)
+                    # NOTE: We deliberately do NOT add parent struct (e.g., 'location') to
+                    # explicitly_handled_cols so select_the_rest won't drop it prematurely.
                     continue
 
                 # 3. Expand standard column-based rules (column / columns)
@@ -119,11 +120,10 @@ class TransformationParser:
         }
 
     @classmethod
-    def _parse_run_directive(cls, run_val: Any, job_name: str) -> Tuple[List[str], Set[str]]:
+    def _parse_run_directive(cls, run_val: Any, job_name: str) -> List[str]:
         """
         Parses 'run' directive values (e.g., 'location.*' or list of statements).
         Takes raw string expressions directly without requiring parameters or aliases.
-        Returns a tuple of (expressions, target_columns_to_exclude).
         """
         raw_statements: List[str] = []
 
@@ -145,18 +145,7 @@ class TransformationParser:
         else:
             raise TypeError(f"[TransformationParser Error] Unsupported type for 'run' in job '{job_name}': {type(run_val)}")
 
-        run_exprs: List[str] = []
-        handled_struct_cols: Set[str] = set()
-
-        for stmt in raw_statements:
-            run_exprs.append(stmt)
-            # If expanding a struct like "location.*", mark parent "location" as explicitly handled
-            if ".*" in stmt:
-                parent_struct = stmt.split(".*")[0].strip()
-                if parent_struct:
-                    handled_struct_cols.add(parent_struct)
-
-        return run_exprs, handled_struct_cols
+        return raw_statements
 
     @classmethod
     def _expand_rule(cls, rule: Dict[str, Any]) -> Generator[Tuple[Dict[str, Any], str], None, None]:
