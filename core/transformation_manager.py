@@ -75,7 +75,7 @@ class TransformationManager:
         return df, joined_dfs
 
     def _apply_rules(
-        self, df: DataFrame, rules_meta: List[Dict[str, Any]], joined_dfs: Dict[str, DataFrame]
+    self, df: DataFrame, rules_meta: List[Dict[str, Any]], joined_dfs: Dict[str, DataFrame]
     ) -> DataFrame:
         already_selected_cols: Set[str] = set()
         raw_except_list: List[str] = []
@@ -113,7 +113,7 @@ class TransformationManager:
                 select_rest_enabled = rest_cfg.get("enable", False)
                 raw_except_list = rest_cfg.get("except", [])
 
-        # STAGE 3: RESOLVE SELECT THE REST & DROP EXCLUDED COLUMNS
+        # STAGE 3: RESOLVE SELECT THE REST
         if select_rest_enabled:
             df = self.resolve_select_the_rest(
                 df=df,
@@ -123,6 +123,7 @@ class TransformationManager:
             )
 
         return df
+
 
     def resolve_select_the_rest(
         self,
@@ -142,41 +143,37 @@ class TransformationManager:
             else:
                 excluded_simple.add(item_clean)
 
-        cols_to_keep = []
-
-        for col_name in df.columns:
-            norm_name = self._normalize_col_name(col_name)
-            is_excluded = False
-
-            if norm_name in already_selected_cols:
-                cols_to_keep.append(col_name)
-                continue
-
-            if norm_name in excluded_simple or col_name in excluded_simple:
-                is_excluded = True
-
-            if not is_excluded and excluded_qualified:
-                for qual in excluded_qualified:
-                    alias_part, col_part = qual.split(".", 1)
-                    if norm_name == col_part and alias_part != self.main_alias:
-                        is_excluded = True
-                        break
-
-            if not is_excluded:
-                cols_to_keep.append(col_name)
-
-        df = df.select(*cols_to_keep)
-
+        right_cols_to_drop = []
         for qual in excluded_qualified:
             alias_part, col_part = qual.split(".", 1)
             if alias_part in joined_dfs and alias_part != self.main_alias:
-                target_df = joined_dfs[alias_part]
-                try:
-                    df = df.drop(target_df[col_part])
-                except Exception:
-                    pass
+                right_cols_to_drop.append(joined_dfs[alias_part][col_part])
 
-        return df
+        for col_ref in right_cols_to_drop:
+            try:
+                df = df.drop(col_ref)
+            except Exception as e:
+                logger.warning(f"Failed to drop qualified column {col_ref}: {e}")
+
+        cols_to_select = []
+        main_df = joined_dfs.get(self.main_alias)
+
+        for col_name in df.columns:
+            norm_name = self._normalize_col_name(col_name)
+
+            if norm_name in already_selected_cols:
+                cols_to_select.append(col_name)
+                continue
+
+            if norm_name in excluded_simple or col_name in excluded_simple:
+                continue
+
+            if main_df and col_name in main_df.columns:
+                cols_to_select.append(main_df[col_name])
+            else:
+                cols_to_select.append(col_name)
+
+        return df.select(*cols_to_select)
 
     def _sanitize_expression_quotes(self, expr: str) -> str:
         """Converts double quotes inside SQL expressions to single quotes."""
