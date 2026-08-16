@@ -21,6 +21,7 @@ class TransformationManager:
         self.df = df
         self.spark = df.sparkSession
         self.main_alias = parsed_config.get("alias") or "c"
+        self.registered_aliases = set(parsed_config.get("registered_aliases", [self.main_alias]))
         raw_table = parsed_config.get("table", "unknown_table")
         self.table_name = re.sub(r"[^a-zA-Z0-9_]", "_", Helper.parse_table_name(raw_table))
 
@@ -84,13 +85,11 @@ class TransformationManager:
 
             if "column" in rule and "expression" in rule:
                 raw_col = rule["column"].strip()
-                # 1. شيل الـ Prefix عشان اسم العمود الناتج بيبقى بدون Prefix
                 target_col = self._strip_prefix(raw_col)
                 expr_str = self._sanitize_expression_quotes(rule["expression"].strip())
                 
                 df = df.withColumn(target_col, F.expr(expr_str))
                 
-                # تسجيل العمود باسمه الصريح وباسمه قبل القطع
                 already_selected_cols.add(target_col)
                 already_selected_cols.add(raw_col)
 
@@ -124,16 +123,16 @@ class TransformationManager:
         return df
 
     def resolve_select_the_rest(
-    self,
-    df: DataFrame,
-    except_list: List[str],
-    already_selected_cols: Set[str],
-    joined_dfs: Dict[str, DataFrame],
+        self,
+        df: DataFrame,
+        except_list: List[str],
+        already_selected_cols: Set[str],
+        joined_dfs: Dict[str, DataFrame],
     ) -> DataFrame:
         excluded_qualified: Set[str] = set()
         excluded_simple: Set[str] = set()
 
-        # 1. تفكيك قائمة الاستثناءات
+        # 1. تفكيك الاستثناءات
         for item in except_list:
             item_clean = item.replace("`", "").strip()
             if "." in item_clean:
@@ -141,50 +140,38 @@ class TransformationManager:
             else:
                 excluded_simple.add(item_clean)
 
-        # 2. تحديد بالضبط الأعمدة المطلوب إسقاطها بحسب جدولها (Ref-based Drop)
-        # مسح أي عمود مستثنى جاي من Right Tables (مثل s.status أو s.nickname)
+        # 2. الإسقاط الصريح بـ Reference لـ c.status أو s.status
         for qual in list(excluded_qualified):
             alias_part, col_part = qual.split(".", 1)
-            if alias_part in joined_dfs and alias_part != self.main_alias:
-                right_df = joined_dfs[alias_part]
-                if col_part in right_df.columns:
+            if alias_part in joined_dfs:
+                source_df = joined_dfs[alias_part]
+                if col_part in source_df.columns:
                     try:
-                        df = df.drop(right_df[col_part])
+                        df = df.drop(source_df[col_part])
                     except Exception as e:
-                        logger.warning(f"Failed to drop right-table column {qual}: {e}")
+                        logger.warning(f"Failed to drop qualified column {qual}: {e}")
 
-        # 3. بناء الـ Selected Columns مع التمييز بين c.status و s.status
-        main_df = joined_dfs.get(self.main_alias)
+        # 3. بناء الـ Select النهائي وتفادي التكرار
         cols_to_select = []
         seen_output_names = set()
 
         for col_name in df.columns:
             plain_name = self._strip_prefix(col_name)
 
-            # فحص هل هذا العمود بالذات هو القادم من الـ Main Table (c)؟
-            is_from_main = main_df is not None and col_name in main_df.columns
-
-            # حالة 1: استثناء c.status بشكل محدد من الجدول الرئيسي
-            if is_from_main and f"{self.main_alias}.{plain_name}" in excluded_qualified:
-                continue
-
-            # حالة 2: استثناء الأعمدة المكتوبة بدون Alias (Simple Except)
+            # تجاهل المستثنيات البسيطة
             if col_name in excluded_simple or plain_name in excluded_simple:
                 continue
 
-            # حالة 3: الأولوية للأعمدة المنشأة في الـ Rules
+            # الأعمدة المعرفة في الـ Rules
             if col_name in already_selected_cols or plain_name in already_selected_cols:
                 if plain_name not in seen_output_names:
                     cols_to_select.append(col_name)
                     seen_output_names.add(plain_name)
                 continue
 
-            # حالة 4: إضافة الأعمدة المتبقية مع ضمان عدم تكرار الاسم في الناتج
+            # الأعمدة المتبقية
             if plain_name not in seen_output_names:
-                if is_from_main:
-                    cols_to_select.append(main_df[col_name])
-                else:
-                    cols_to_select.append(col_name)
+                cols_to_select.append(col_name)
                 seen_output_names.add(plain_name)
 
         return df.select(*cols_to_select)

@@ -22,12 +22,15 @@ class TransformationParser:
 
         raw_joins = clean_config.get("joins", [])
         parsed_joins: List[Dict[str, Any]] = []
+        registered_aliases: List[str] = [main_alias]
+
         if isinstance(raw_joins, list):
             for join_item in raw_joins:
                 if isinstance(join_item, dict):
-                    parsed_joins.append(
-                        cls._parse_join(cls._sanitize_dict(join_item))
-                    )
+                    parsed_join = cls._parse_join(cls._sanitize_dict(join_item))
+                    parsed_joins.append(parsed_join)
+                    if parsed_join.get("alias"):
+                        registered_aliases.append(parsed_join["alias"])
 
         raw_rules = clean_config.get("rules", [])
         parsed_rules: List[Dict[str, Any]] = []
@@ -46,6 +49,7 @@ class TransformationParser:
         output = {
             "table": raw_table,
             "alias": main_alias,
+            "registered_aliases": list(set(registered_aliases)),
             "joins": parsed_joins,
             "rules": parsed_rules,
             "ContainVarsFrom": clean_config.get("ContainVarsFrom", []),
