@@ -1,5 +1,5 @@
 from typing import Dict, Any, List, Set, Optional
-from yamlpipe.registry.transformation_registry import TransformationRegistry
+from .transformation_registry import TransformationRegistry
 
 
 class TransformationParser:
@@ -29,11 +29,6 @@ class TransformationParser:
                         cls._parse_join(cls._sanitize_dict(join_item))
                     )
 
-        known_aliases = {main_alias}
-        for j in parsed_joins:
-            if j.get("alias"):
-                known_aliases.add(j["alias"])
-
         raw_rules = clean_config.get("rules", [])
         parsed_rules: List[Dict[str, Any]] = []
 
@@ -41,22 +36,8 @@ class TransformationParser:
             for rule_item in raw_rules:
                 if isinstance(rule_item, dict):
                     sanitized_rule = cls._sanitize_dict(rule_item)
-
-                    expanded = TransformationRegistry.process_rule(
-                        sanitized_rule
-                    )
-
-                    for rule in expanded:
-                        if "column" in rule and isinstance(
-                            rule["column"], str
-                        ):
-                            rule["column"] = cls._strip_alias(
-                                rule["column"], known_aliases
-                            )
-
+                    expanded = TransformationRegistry.process_rule(sanitized_rule)
                     parsed_rules.extend(expanded)
-
-        cls._normalize_except_clause(parsed_rules, known_aliases)
 
         contained_functions = sorted(
             list(cls._extract_function_names(clean_config))
@@ -75,29 +56,6 @@ class TransformationParser:
             output["schemas"] = schemas
 
         return output
-
-    @classmethod
-    def _strip_alias(cls, column_name: str, known_aliases: Set[str]) -> str:
-        if "." in column_name:
-            prefix, col = column_name.split(".", 1)
-            if prefix in known_aliases:
-                return col
-        return column_name
-
-    @classmethod
-    def _normalize_except_clause(
-        cls, rules: List[Dict[str, Any]], known_aliases: Set[str]
-    ) -> None:
-        for rule in rules:
-            if "select_the_rest" in rule and isinstance(
-                rule["select_the_rest"], dict
-            ):
-                except_list = rule["select_the_rest"].get("except", [])
-                if isinstance(except_list, list):
-                    rule["select_the_rest"]["except"] = [
-                        cls._strip_alias(col, known_aliases)
-                        for col in except_list
-                    ]
 
     @classmethod
     def _extract_function_names(cls, data: Any) -> Set[str]:

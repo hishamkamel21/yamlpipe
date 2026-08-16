@@ -83,11 +83,16 @@ class TransformationManager:
                 continue
 
             if "column" in rule and "expression" in rule:
-                col_name = rule["column"].strip()
+                raw_col = rule["column"].strip()
+                # 1. شيل الـ Prefix عشان اسم العمود الناتج بيبقى بدون Prefix
+                target_col = self._strip_prefix(raw_col)
                 expr_str = self._sanitize_expression_quotes(rule["expression"].strip())
-                df = df.withColumn(col_name, F.expr(expr_str))
-                already_selected_cols.add(self._normalize_col_name(col_name))
-                already_selected_cols.add(col_name)
+                
+                df = df.withColumn(target_col, F.expr(expr_str))
+                
+                # تسجيل العمود باسمه الصريح وباسمه قبل القطع
+                already_selected_cols.add(target_col)
+                already_selected_cols.add(raw_col)
 
             elif "run" in rule:
                 run_expr = rule["run"].strip()
@@ -99,9 +104,8 @@ class TransformationManager:
                         schema_field = next((f for f in df.schema.fields if f.name == target_col), None)
                         if schema_field and hasattr(schema_field.dataType, "names"):
                             for field in schema_field.dataType.names:
-                                out_col = f"{col_prefix}_{field}"
+                                out_col = f"{self._strip_prefix(col_prefix)}_{field}"
                                 df = df.withColumn(out_col, F.col(f"`{target_col}`.{field}"))
-                                already_selected_cols.add(self._normalize_col_name(out_col))
                                 already_selected_cols.add(out_col)
 
             elif "select_the_rest" in rule:
@@ -126,6 +130,7 @@ class TransformationManager:
         already_selected_cols: Set[str],
         joined_dfs: Dict[str, DataFrame],
     ) -> DataFrame:
+        # هنا الـ Prefixes بتفضل زي ما هي لتمييز الأعمدة بـ accuracy عالية
         excluded_qualified: Set[str] = set()
         excluded_simple: Set[str] = set()
 
@@ -135,8 +140,8 @@ class TransformationManager:
                 excluded_qualified.add(item_clean)
             else:
                 excluded_simple.add(item_clean)
-                excluded_simple.add(self._normalize_col_name(item_clean))
 
+        # إسقاط الأعمدة المستثناة الصريحة الجاية من الـ Joins
         right_cols_to_drop = []
         for qual in excluded_qualified:
             alias_part, col_part = qual.split(".", 1)
@@ -153,15 +158,16 @@ class TransformationManager:
         main_df = joined_dfs.get(self.main_alias)
 
         for col_name in df.columns:
-            norm_name = self._normalize_col_name(col_name)
+            plain_name = self._strip_prefix(col_name)
 
-            if col_name in already_selected_cols or norm_name in already_selected_cols:
+            if col_name in already_selected_cols or plain_name in already_selected_cols:
                 cols_to_select.append(col_name)
                 continue
 
-            if col_name in excluded_simple or norm_name in excluded_simple:
+            if col_name in excluded_simple or plain_name in excluded_simple:
                 continue
 
+            # اختيار العمود المتبقي
             if main_df and col_name in main_df.columns:
                 cols_to_select.append(main_df[col_name])
             else:
@@ -169,9 +175,9 @@ class TransformationManager:
 
         return df.select(*cols_to_select)
 
-    def _sanitize_expression_quotes(self, expr: str) -> str:
-        return re.sub(r'\"([^\"]*)\"', r"'\1'", expr)
-
-    def _normalize_col_name(self, col_ref: str) -> str:
+    def _strip_prefix(self, col_ref: str) -> str:
         clean = col_ref.replace("`", "").strip()
         return clean.split(".")[-1]
+
+    def _sanitize_expression_quotes(self, expr: str) -> str:
+        return re.sub(r'\"([^\"]*)\"', r"'\1'", expr)
