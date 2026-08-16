@@ -27,7 +27,7 @@ class TransformationManager:
     def apply_transformations(self) -> DataFrame:
         logger.info(f"Applying DataFrame transformations for table '{self.table_name}'...")
         
-        # Keep track of aliased right-side DataFrames to resolve ambiguous drops later
+        # Keep track of aliased right-side DataFrames to resolve ambiguous drops/selects
         joined_dfs: Dict[str, DataFrame] = {}
         
         current_df = self.df.alias(self.main_alias)
@@ -77,7 +77,7 @@ class TransformationManager:
     def _apply_rules(
         self, df: DataFrame, rules_meta: List[Dict[str, Any]], joined_dfs: Dict[str, DataFrame]
     ) -> DataFrame:
-        processed_columns: Set[str] = set()
+        already_selected_cols: Set[str] = set()
         raw_except_list: List[str] = []
         select_rest_enabled = False
 
@@ -90,7 +90,7 @@ class TransformationManager:
                 col_name = rule["column"].strip()
                 expr_str = self._sanitize_expression_quotes(rule["expression"].strip())
                 df = df.withColumn(col_name, F.expr(expr_str))
-                processed_columns.add(self._normalize_col_name(col_name))
+                already_selected_cols.add(self._normalize_col_name(col_name))
 
             # CASE 2: Struct Expansion (e.g. location.*)
             elif "run" in rule:
@@ -105,7 +105,7 @@ class TransformationManager:
                             for field in schema_field.dataType.names:
                                 out_col = f"{col_prefix}_{field}"
                                 df = df.withColumn(out_col, F.col(f"`{target_col}`.{field}"))
-                                processed_columns.add(self._normalize_col_name(out_col))
+                                already_selected_cols.add(self._normalize_col_name(out_col))
 
             # CASE 3: Select The Rest Config
             elif "select_the_rest" in rule:
@@ -113,52 +113,66 @@ class TransformationManager:
                 select_rest_enabled = rest_cfg.get("enable", False)
                 raw_except_list = rest_cfg.get("except", [])
 
-        # STAGE 3: DROP EXCLUDED COLUMNS
+        # STAGE 3: RESOLVE SELECT THE REST & DROP EXCLUDED COLUMNS
         if select_rest_enabled:
-            df = self._drop_except_columns(df, raw_except_list, processed_columns, joined_dfs)
+            df = self.resolve_select_the_rest(
+                df=df,
+                except_list=raw_except_list,
+                already_selected_cols=already_selected_cols,
+                joined_dfs=joined_dfs,
+            )
 
         return df
 
-    def _drop_except_columns(
+    def resolve_select_the_rest(
         self,
         df: DataFrame,
-        raw_except_list: List[str],
-        processed_columns: Set[str],
+        except_list: List[str],
+        already_selected_cols: Set[str],
         joined_dfs: Dict[str, DataFrame],
     ) -> DataFrame:
-        """Safely drops columns specified in the except list, resolving ambiguity
+        
+        excluded_qualified: Set[str] = set()
+        excluded_simple: Set[str] = set()
 
-        for aliased join columns like `c.status` or `s.status`.
-        """
-        for item in raw_except_list:
+        for item in except_list:
             item_clean = item.replace("`", "").strip()
-            norm_name = self._normalize_col_name(item_clean)
+            if "." in item_clean:
+                excluded_qualified.add(item_clean)
+            else:
+                excluded_simple.add(item_clean)
 
-            # Skip dropping if this was created as a new column in STAGE 2
-            if norm_name in processed_columns:
+        cols_to_keep = []
+
+        for col_name in df.columns:
+            norm_name = self._normalize_col_name(col_name)
+            is_excluded = False
+
+            if norm_name in already_selected_cols:
+                cols_to_keep.append(col_name)
                 continue
 
-            if "." in item_clean:
-                alias_part, col_part = item_clean.split(".", 1)
-                
-                # If we tracked the aliased DataFrame, drop using its exact column reference
-                if alias_part in joined_dfs:
-                    target_df = joined_dfs[alias_part]
-                    try:
-                        df = df.drop(target_df[col_part])
-                        continue
-                    except Exception:
-                        pass
-                
-                # Fallback drop attempt using backticked column spec
+            if norm_name in excluded_simple or col_name in excluded_simple:
+                is_excluded = True
+
+            if not is_excluded and excluded_qualified:
+                for qual in excluded_qualified:
+                    alias_part, col_part = qual.split(".", 1)
+                    if norm_name == col_part and alias_part != self.main_alias:
+                        is_excluded = True
+                        break
+
+            if not is_excluded:
+                cols_to_keep.append(col_name)
+
+        df = df.select(*cols_to_keep)
+
+        for qual in excluded_qualified:
+            alias_part, col_part = qual.split(".", 1)
+            if alias_part in joined_dfs and alias_part != self.main_alias:
+                target_df = joined_dfs[alias_part]
                 try:
-                    df = df.drop(F.col(f"{alias_part}.{col_part}"))
-                except Exception:
-                    df = df.drop(col_part)
-            else:
-                # Direct unaliased column drop
-                try:
-                    df = df.drop(item_clean)
+                    df = df.drop(target_df[col_part])
                 except Exception:
                     pass
 
