@@ -38,7 +38,6 @@ class ReentrantFileLock:
                 del self._thread_local.locks[self.lock_file_path]
                 self.lock.release()
 
-
 class CacheManager:
 
     @staticmethod
@@ -66,12 +65,23 @@ class CacheManager:
         )
 
     @staticmethod
+    def _resolve_custom_check_path(project_root: str, check_name: str) -> str:
+        """Resolves Python file path inside project_root/custom_checks/."""
+        check_path = os.path.join(project_root, "custom_checks", f"{check_name}.py")
+        if os.path.exists(check_path):
+            return check_path
+        raise FileNotFoundError(
+            f"[CacheManager Error] Custom check file missing: '{check_path}'"
+        )
+
+    @staticmethod
     def _load_hashes(hash_file_path: str) -> Dict[str, Any]:
         default_structure = {
             "transformation_rules": {},
             "quality_gate": {},
             "vars": {},
             "functions": {},
+            "custom_checks": {},
         }
         if not os.path.exists(hash_file_path):
             return default_structure
@@ -139,6 +149,7 @@ class CacheManager:
 
                         var_deps = cached_data.get("ContainVarsFrom", [])
                         func_deps = cached_data.get("ContainFunctionsFrom", [])
+                        custom_check_deps = cached_data.get("ContainCustomChecksFrom", [])
                         valid = True
 
                         # 1. Check Var Dependencies
@@ -148,11 +159,19 @@ class CacheManager:
                                 valid = False
                                 break
 
-                        # 2. Check Custom Function Script Dependencies
+                        # 2. Check Custom Function Dependencies (from functions/)
                         if valid:
                             for func_name in func_deps:
                                 func_path = cls._resolve_function_path(project_root, func_name)
                                 if cls._compute_md5(func_path) != all_hashes.get("functions", {}).get(func_name):
+                                    valid = False
+                                    break
+
+                        # 3. Check Custom Quality Check Dependencies (from custom_checks/)
+                        if valid:
+                            for check_name in custom_check_deps:
+                                check_path = cls._resolve_custom_check_path(project_root, check_name)
+                                if cls._compute_md5(check_path) != all_hashes.get("custom_checks", {}).get(check_name):
                                     valid = False
                                     break
 
@@ -205,6 +224,11 @@ class CacheManager:
                     for func_name in compiled_result.get("ContainFunctionsFrom", []):
                         func_path = cls._resolve_function_path(project_root, func_name)
                         latest_hashes["functions"][func_name] = cls._compute_md5(func_path)
+
+                    # Sync Custom Check MD5s (from custom_checks/)
+                    for check_name in compiled_result.get("ContainCustomChecksFrom", []):
+                        check_path = cls._resolve_custom_check_path(project_root, check_name)
+                        latest_hashes["custom_checks"][check_name] = cls._compute_md5(check_path)
 
                     cls._save_hashes_atomic(hash_file_path, latest_hashes)
 
