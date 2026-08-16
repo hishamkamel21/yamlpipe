@@ -46,6 +46,7 @@ class ColumnQualityParser:
                             check.get("custom_check_name")
                             or check.get("script")
                             or check.get("check_name")
+                            or check.get("the_check")
                         )
                         if custom_script:
                             custom_checks_used.add(custom_script)
