@@ -1,9 +1,5 @@
-import logging
-import re
-from typing import Any, Dict, List, Optional, Set
+from typing import Dict, Any, List, Set, Optional
 from yamlpipe.registry.transformation_registry import TransformationRegistry
-
-logger = logging.getLogger("TransformationParser")
 
 
 class TransformationParser:
@@ -19,13 +15,11 @@ class TransformationParser:
                 f"[TransformationParser Error] Expected dict configuration, got {type(raw_config).__name__}"
             )
 
-        # 1. Clean non-breaking spaces (\xa0) and key whitespace
         clean_config = cls._sanitize_dict(raw_config)
 
         raw_table = clean_config.get("table", "unknown_table")
         main_alias = clean_config.get("alias", "c")
 
-        # 2. Parse Joins Configuration
         raw_joins = clean_config.get("joins", [])
         parsed_joins: List[Dict[str, Any]] = []
         if isinstance(raw_joins, list):
@@ -35,13 +29,11 @@ class TransformationParser:
                         cls._parse_join(cls._sanitize_dict(join_item))
                     )
 
-        # 3. Collect active aliases (e.g., {'c', 's'})
         known_aliases = {main_alias}
         for j in parsed_joins:
             if j.get("alias"):
                 known_aliases.add(j["alias"])
 
-        # 4. Parse Rules via TransformationRegistry
         raw_rules = clean_config.get("rules", [])
         parsed_rules: List[Dict[str, Any]] = []
 
@@ -50,12 +42,10 @@ class TransformationParser:
                 if isinstance(rule_item, dict):
                     sanitized_rule = cls._sanitize_dict(rule_item)
 
-                    # إبقاء الـ Alias داخل قائمة columns لتعويض ${col} به بالكامل
                     expanded = TransformationRegistry.process_rule(
                         sanitized_rule
                     )
 
-                    # تنظيف الـ Alias من اسم العامود الناتج (Target Column Output) فقط
                     for rule in expanded:
                         if "column" in rule and isinstance(
                             rule["column"], str
@@ -66,10 +56,8 @@ class TransformationParser:
 
                     parsed_rules.extend(expanded)
 
-        # 5. Normalize select_the_rest exceptions
         cls._normalize_except_clause(parsed_rules, known_aliases)
 
-        # 6. Extract Function References Directly
         contained_functions = sorted(
             list(cls._extract_function_names(clean_config))
         )
@@ -90,7 +78,6 @@ class TransformationParser:
 
     @classmethod
     def _strip_alias(cls, column_name: str, known_aliases: Set[str]) -> str:
-        """إزالة الـ Alias Prefix (مثل 'c.customer_name' -> 'customer_name')"""
         if "." in column_name:
             prefix, col = column_name.split(".", 1)
             if prefix in known_aliases:
@@ -101,7 +88,6 @@ class TransformationParser:
     def _normalize_except_clause(
         cls, rules: List[Dict[str, Any]], known_aliases: Set[str]
     ) -> None:
-        """تنظيف الأسماء الموجودة داخل except الخاصة بـ select_the_rest"""
         for rule in rules:
             if "select_the_rest" in rule and isinstance(
                 rule["select_the_rest"], dict
@@ -136,9 +122,11 @@ class TransformationParser:
                 sanitized[clean_k] = cls._sanitize_dict(v)
             elif isinstance(v, list):
                 sanitized[clean_k] = [
-                    cls._sanitize_dict(i) if isinstance(i, dict) else i
+                    cls._sanitize_dict(i) if isinstance(i, dict) else (i.replace("\xa0", "").strip() if isinstance(i, str) else i)
                     for i in v
                 ]
+            elif isinstance(v, str):
+                sanitized[clean_k] = v.replace("\xa0", "").strip()
             else:
                 sanitized[clean_k] = v
         return sanitized
@@ -147,7 +135,7 @@ class TransformationParser:
     def _parse_join(cls, join_cfg: Dict[str, Any]) -> Dict[str, Any]:
         target_table = join_cfg.get("table", "")
         tbl_alias = join_cfg.get("alias") or target_table
-        how = join_cfg.get("how", join_cfg.get("type", "left")).lower()
+        how = str(join_cfg.get("how", join_cfg.get("type", "left"))).lower()
         broadcast = bool(join_cfg.get("broadcast", False))
         on_clause = join_cfg.get("on_clause") or join_cfg.get("on", "")
         sql_clause = (

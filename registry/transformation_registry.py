@@ -1,6 +1,5 @@
 import logging
 from typing import Dict, Any, List
-from yamlpipe.utility.module_loader import ModuleLoader
 
 logger = logging.getLogger("TransformationRegistry")
 
@@ -9,10 +8,6 @@ class TransformationRegistry:
 
     @classmethod
     def process_rule(cls, rule_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Routes rule structures to dedicated handlers.
-        Returns a list of standardized rule definitions.
-        """
         if "call_function" in rule_cfg:
             return cls._handle_call_function(rule_cfg)
         elif "expression" in rule_cfg and "columns" in rule_cfg:
@@ -28,17 +23,11 @@ class TransformationRegistry:
 
     @classmethod
     def _handle_template_expression(cls, rule_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Handles inline YAML template expressions like:
-        - expression: upper(trim(${col}))
-          columns: [customer_id, customer_name]
-        """
         raw_expr = rule_cfg.get("expression", "")
         columns = rule_cfg.get("columns", [])
 
         resolved_rules = []
         for col in columns:
-            # Substitute ${col} or ${column} placeholders with the column name
             resolved_expr = raw_expr.replace("${col}", col).replace("${column}", col)
             resolved_rules.append({
                 "column": col,
@@ -49,9 +38,6 @@ class TransformationRegistry:
 
     @classmethod
     def _handle_call_function(cls, rule_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Loads python functions via ModuleLoader and substitutes ${col} parameter references.
-        """
         func_name = rule_cfg.get("call_function")
         raw_params = rule_cfg.get("params", {})
         columns = rule_cfg.get("columns", [])
@@ -67,6 +53,8 @@ class TransformationRegistry:
                     resolved_params[param_key] = param_val
 
             try:
+                # Import dynamically inside method to avoid circular import issues
+                from yamlpipe.utility.module_loader import ModuleLoader
                 sql_expr = ModuleLoader.functions_loader(func_name, **resolved_params)
 
                 if not isinstance(sql_expr, str):
