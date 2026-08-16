@@ -1,5 +1,5 @@
 from typing import Dict, Any, List, Set, Optional
-from .transformation_registry import TransformationRegistry
+from yamlpipe.registry.transformation_registry import TransformationRegistry
 
 
 class TransformationParser:
