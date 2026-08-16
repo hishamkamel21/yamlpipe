@@ -27,25 +27,19 @@ class TransformationManager:
         self.table_name = re.sub(r"[^a-zA-Z0-9_]", "_", Helper.parse_table_name(raw_table))
 
     def apply_transformations(self) -> DataFrame:
-        jobs = self.parsed_config.get("job", {})
-        if not jobs:
-            logger.warning(f"No transformation jobs configured for table '{self.table_name}'. Returning original DataFrame.")
-            return self.df
-
-        # Extract primary job definition
-        job_meta = jobs.get("base") or next(iter(jobs.values()))
-        
         logger.info(f"Applying DataFrame transformations for table '{self.table_name}'...")
 
         current_df = self.df.alias(self.main_alias)
 
         # STAGE 1: EXECUTE JOINS
-        joins_meta = job_meta.get("joins", [])
+        joins_meta = self.parsed_config.get("joins", [])
         if joins_meta:
             current_df = self._apply_joins(current_df, joins_meta)
 
-        # STAGE 2: APPLY EXPRESSIONS & PROJECTIONS
-        current_df = self._apply_projections(current_df, job_meta)
+        # STAGE 2: APPLY RULES & PROJECTIONS
+        rules_meta = self.parsed_config.get("rules", [])
+        if rules_meta:
+            current_df = self._apply_rules(current_df, rules_meta)
 
         logger.info(f"Successfully applied transformations for '{self.table_name}'.")
         return current_df
@@ -70,8 +64,8 @@ class TransformationManager:
                 right_df = F.broadcast(right_df)
 
             # Parse Join Condition Clause
-            sql_clause = j.get("sql", "")
             on_clause = j.get("on_clause")
+            sql_clause = j.get("sql", "")
 
             if not on_clause and " ON " in sql_clause.upper():
                 on_clause = re.split(r"\s+ON\s+", sql_clause, flags=re.IGNORECASE)[-1]
@@ -84,57 +78,56 @@ class TransformationManager:
 
         return df
 
-    def _apply_projections(self, df: DataFrame, job_meta: Dict[str, Any]) -> DataFrame:
-        """Applies explicit column rules, star expansions, and select_the_rest pruning."""
-        raw_exprs: List[str] = job_meta.get("exprs", [])
-        explicit_handled_raw = job_meta.get("explicitly_handled_cols", [])
-        select_rest_cfg = job_meta.get("select_the_rest", {})
-
+    def _apply_rules(self, df: DataFrame, rules_meta: List[Dict[str, Any]]) -> DataFrame:
+        """Applies transformation rules sequentially using withColumn and drops excluded columns."""
         processed_columns: Set[str] = set()
+        cols_to_except: Set[str] = set()
+        select_rest_enabled = False
 
-        # 1. Process Explicit Expressions and Structural Operations
-        for expr_str in raw_exprs:
-            if not isinstance(expr_str, str):
+        for rule in rules_meta:
+            if not isinstance(rule, dict):
                 continue
 
-            clean_expr = expr_str.strip().rstrip(",")
+            # Case 1: Template expression over multiple columns
+            if "expression" in rule and "columns" in rule:
+                template_expr = rule["expression"]
+                for col_name in rule["columns"]:
+                    formatted_expr = template_expr.replace("${col}", col_name).replace("${column}", col_name)
+                    df = df.withColumn(col_name, F.expr(formatted_expr))
+                    processed_columns.add(self._normalize_col_name(col_name))
 
-            # Handle struct or table expansion (e.g., location.*)
-            if clean_expr.endswith(".*"):
-                col_prefix = clean_expr[:-2]
-                if col_prefix in df.columns:
-                    for field in df.schema[col_prefix].dataType.names:
-                        out_col = f"{col_prefix}_{field}"
-                        df = df.withColumn(out_col, F.col(f"`{col_prefix}`.{field}"))
-                        processed_columns.add(out_col)
-                continue
+            # Case 2: Structural expansion / wildcard run (e.g., location.*)
+            elif "run" in rule:
+                run_expr = rule["run"].strip()
+                if run_expr.endswith(".*"):
+                    col_prefix = run_expr[:-2]
+                    if col_prefix in df.columns:
+                        for field in df.schema[col_prefix].dataType.names:
+                            out_col = f"{col_prefix}_{field}"
+                            df = df.withColumn(out_col, F.col(f"`{col_prefix}`.{field}"))
+                            processed_columns.add(self._normalize_col_name(out_col))
 
-            # Handle Expressions with Aliases (e.g., expr AS alias)
-            alias_match = re.search(r"^(.*?)\s+AS\s+[`]?([a-zA-Z0-9_]+)[`]?$", clean_expr, re.IGNORECASE | re.DOTALL)
-            if alias_match:
-                sql_expression, target_col = alias_match.group(1).strip(), alias_match.group(2).strip()
-                df = df.withColumn(target_col, F.expr(sql_expression))
-                processed_columns.add(target_col)
-            else:
-                # Direct SQL Select Expression fallback
-                col_name = self._normalize_col_name(clean_expr)
-                df = df.withColumn(col_name, F.expr(clean_expr))
-                processed_columns.add(col_name)
+            # Case 3: Explicit single column mapping with expression
+            elif "column" in rule and "expression" in rule:
+                col_name = rule["column"].strip()
+                expr_str = rule["expression"].strip()
+                df = df.withColumn(col_name, F.expr(expr_str))
+                processed_columns.add(self._normalize_col_name(col_name))
 
-        # 2. Process select_the_rest Exclusions
-        if select_rest_cfg and select_rest_cfg.get("enable"):
-            raw_except = select_rest_cfg.get("except", [])
-            
-            # Combine 'except' fields and explicit output columns into exclusion set
-            cols_to_drop: Set[str] = {
-                self._normalize_col_name(c) for c in raw_except + explicit_handled_raw
-            }
+            # Case 4: select_the_rest rule
+            elif "select_the_rest" in rule:
+                rest_cfg = rule["select_the_rest"]
+                select_rest_enabled = rest_cfg.get("enable", False)
+                raw_except = rest_cfg.get("except", [])
+                cols_to_except.update(self._normalize_col_name(c) for c in raw_except)
 
-            # Retain newly created/processed columns
-            cols_to_drop = cols_to_drop - processed_columns
+        # STAGE 3: APPLY SELECT_THE_REST DROPS
+        if select_rest_enabled:
+            existing_cols_to_drop = [
+                c for c in df.columns 
+                if self._normalize_col_name(c) in cols_to_except and self._normalize_col_name(c) not in processed_columns
+            ]
 
-            existing_cols_to_drop = [c for c in df.columns if c in cols_to_drop or self._normalize_col_name(c) in cols_to_drop]
-            
             if existing_cols_to_drop:
                 df = df.drop(*existing_cols_to_drop)
 
