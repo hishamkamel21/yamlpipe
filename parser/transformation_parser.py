@@ -1,5 +1,6 @@
 import logging
-from typing import Dict, Any, List, Set
+import re
+from typing import Any, Dict, List, Optional, Set
 from yamlpipe.registry.transformation_registry import TransformationRegistry
 
 logger = logging.getLogger("TransformationParser")
@@ -8,27 +9,39 @@ logger = logging.getLogger("TransformationParser")
 class TransformationParser:
 
     @classmethod
-    def parse(cls, raw_config: Dict[str, Any]) -> Dict[str, Any]:
+    def parse(
+        cls,
+        raw_config: Dict[str, Any],
+        schemas: Optional[Dict[str, List[str]]] = None,
+    ) -> Dict[str, Any]:
         if not isinstance(raw_config, dict):
             raise TypeError(
                 f"[TransformationParser Error] Expected dict configuration, got {type(raw_config).__name__}"
             )
 
-        # Clean non-breaking spaces (\xa0) and key whitespace
+        # 1. Clean non-breaking spaces (\xa0) and key whitespace
         clean_config = cls._sanitize_dict(raw_config)
 
         raw_table = clean_config.get("table", "unknown_table")
         main_alias = clean_config.get("alias", "c")
 
-        # 1. Parse Joins Configuration
+        # 2. Parse Joins Configuration
         raw_joins = clean_config.get("joins", [])
         parsed_joins: List[Dict[str, Any]] = []
         if isinstance(raw_joins, list):
             for join_item in raw_joins:
                 if isinstance(join_item, dict):
-                    parsed_joins.append(cls._parse_join(cls._sanitize_dict(join_item)))
+                    parsed_joins.append(
+                        cls._parse_join(cls._sanitize_dict(join_item))
+                    )
 
-        # 2. Parse Rules via TransformationRegistry
+        # 3. Collect active aliases (e.g., {'c', 's'})
+        known_aliases = {main_alias}
+        for j in parsed_joins:
+            if j.get("alias"):
+                known_aliases.add(j["alias"])
+
+        # 4. Parse Rules via TransformationRegistry
         raw_rules = clean_config.get("rules", [])
         parsed_rules: List[Dict[str, Any]] = []
 
@@ -36,13 +49,40 @@ class TransformationParser:
             for rule_item in raw_rules:
                 if isinstance(rule_item, dict):
                     sanitized_rule = cls._sanitize_dict(rule_item)
-                    expanded = TransformationRegistry.process_rule(sanitized_rule)
+
+                    # إزالة الـ Aliases من قائمة الأعمدة قبل تنفيذ الـ Function Call
+                    if "columns" in sanitized_rule and isinstance(
+                        sanitized_rule["columns"], list
+                    ):
+                        sanitized_rule["columns"] = [
+                            cls._strip_alias(col, known_aliases)
+                            for col in sanitized_rule["columns"]
+                        ]
+
+                    expanded = TransformationRegistry.process_rule(
+                        sanitized_rule
+                    )
+
+                    # تنظيف أسماء الأعمدة في قواعد المخرجات النهائية
+                    for rule in expanded:
+                        if "column" in rule and isinstance(
+                            rule["column"], str
+                        ):
+                            rule["column"] = cls._strip_alias(
+                                rule["column"], known_aliases
+                            )
+
                     parsed_rules.extend(expanded)
 
-        # 3. Extract Function References Directly
-        contained_functions = sorted(list(cls._extract_function_names(clean_config)))
+        # 5. Normalize select_the_rest exceptions
+        cls._normalize_except_clause(parsed_rules, known_aliases)
 
-        return {
+        # 6. Extract Function References Directly
+        contained_functions = sorted(
+            list(cls._extract_function_names(clean_config))
+        )
+
+        output = {
             "table": raw_table,
             "alias": main_alias,
             "joins": parsed_joins,
@@ -51,11 +91,40 @@ class TransformationParser:
             "ContainFunctionsFrom": contained_functions,
         }
 
+        # دمج الـ Schemas إذا تم تمريرها
+        if schemas is not None:
+            output["schemas"] = schemas
+
+        return output
+
+    @classmethod
+    def _strip_alias(cls, column_name: str, known_aliases: Set[str]) -> str:
+        """يقوم بإزالة الـ Alias prefix مثل 'c.status' لتصبح 'status'"""
+        if "." in column_name:
+            prefix, col = column_name.split(".", 1)
+            if prefix in known_aliases:
+                return col
+        return column_name
+
+    @classmethod
+    def _normalize_except_clause(
+        cls, rules: List[Dict[str, Any]], known_aliases: Set[str]
+    ) -> None:
+        """تنظيف الأسماء الموجودة داخل except الخاصة بـ select_the_rest"""
+        for rule in rules:
+            if "select_the_rest" in rule and isinstance(
+                rule["select_the_rest"], dict
+            ):
+                except_list = rule["select_the_rest"].get("except", [])
+                if isinstance(except_list, list):
+                    rule["select_the_rest"]["except"] = [
+                        cls._strip_alias(col, known_aliases)
+                        for col in except_list
+                    ]
+
     @classmethod
     def _extract_function_names(cls, data: Any) -> Set[str]:
-        """Recursively scans configuration dictionary for 'call_function' references."""
         found_funcs: Set[str] = set()
-
         if isinstance(data, dict):
             for k, v in data.items():
                 if k == "call_function" and isinstance(v, str):
@@ -65,12 +134,10 @@ class TransformationParser:
         elif isinstance(data, list):
             for item in data:
                 found_funcs.update(cls._extract_function_names(item))
-
         return found_funcs
 
     @classmethod
     def _sanitize_dict(cls, d: Dict[str, Any]) -> Dict[str, Any]:
-        """Recursively removes non-breaking spaces (\xa0) and whitespace from keys."""
         sanitized = {}
         for k, v in d.items():
             clean_k = str(k).replace("\xa0", "").strip()
@@ -78,7 +145,8 @@ class TransformationParser:
                 sanitized[clean_k] = cls._sanitize_dict(v)
             elif isinstance(v, list):
                 sanitized[clean_k] = [
-                    cls._sanitize_dict(i) if isinstance(i, dict) else i for i in v
+                    cls._sanitize_dict(i) if isinstance(i, dict) else i
+                    for i in v
                 ]
             else:
                 sanitized[clean_k] = v
