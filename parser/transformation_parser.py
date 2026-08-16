@@ -50,20 +50,12 @@ class TransformationParser:
                 if isinstance(rule_item, dict):
                     sanitized_rule = cls._sanitize_dict(rule_item)
 
-                    # إزالة الـ Aliases من قائمة الأعمدة قبل تنفيذ الـ Function Call
-                    if "columns" in sanitized_rule and isinstance(
-                        sanitized_rule["columns"], list
-                    ):
-                        sanitized_rule["columns"] = [
-                            cls._strip_alias(col, known_aliases)
-                            for col in sanitized_rule["columns"]
-                        ]
-
+                    # إبقاء الـ Alias داخل قائمة columns لتعويض ${col} به بالكامل
                     expanded = TransformationRegistry.process_rule(
                         sanitized_rule
                     )
 
-                    # تنظيف أسماء الأعمدة في قواعد المخرجات النهائية
+                    # تنظيف الـ Alias من اسم العامود الناتج (Target Column Output) فقط
                     for rule in expanded:
                         if "column" in rule and isinstance(
                             rule["column"], str
@@ -91,7 +83,6 @@ class TransformationParser:
             "ContainFunctionsFrom": contained_functions,
         }
 
-        # دمج الـ Schemas إذا تم تمريرها
         if schemas is not None:
             output["schemas"] = schemas
 
@@ -99,7 +90,7 @@ class TransformationParser:
 
     @classmethod
     def _strip_alias(cls, column_name: str, known_aliases: Set[str]) -> str:
-        """يقوم بإزالة الـ Alias prefix مثل 'c.status' لتصبح 'status'"""
+        """إزالة الـ Alias Prefix (مثل 'c.customer_name' -> 'customer_name')"""
         if "." in column_name:
             prefix, col = column_name.split(".", 1)
             if prefix in known_aliases:
