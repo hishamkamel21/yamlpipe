@@ -26,22 +26,29 @@ class TransformationManager:
 
     def apply_transformations(self) -> DataFrame:
         logger.info(f"Applying DataFrame transformations for table '{self.table_name}'...")
+        
+        # Keep track of aliased right-side DataFrames to resolve ambiguous drops later
+        joined_dfs: Dict[str, DataFrame] = {}
+        
         current_df = self.df.alias(self.main_alias)
+        joined_dfs[self.main_alias] = current_df
 
         # STAGE 1: JOINS
         joins_meta = self.parsed_config.get("joins", [])
         if joins_meta:
-            current_df = self._apply_joins(current_df, joins_meta)
+            current_df, joined_dfs = self._apply_joins(current_df, joins_meta, joined_dfs)
 
         # STAGE 2: RULES
         rules_meta = self.parsed_config.get("rules", [])
         if rules_meta:
-            current_df = self._apply_rules(current_df, rules_meta)
+            current_df = self._apply_rules(current_df, rules_meta, joined_dfs)
 
         logger.info(f"Successfully applied transformations for '{self.table_name}'.")
         return current_df
 
-    def _apply_joins(self, df: DataFrame, joins_meta: List[Dict[str, Any]]) -> DataFrame:
+    def _apply_joins(
+        self, df: DataFrame, joins_meta: List[Dict[str, Any]], joined_dfs: Dict[str, DataFrame]
+    ) -> tuple[DataFrame, Dict[str, DataFrame]]:
         for j in joins_meta:
             if not isinstance(j, dict):
                 continue
@@ -54,6 +61,8 @@ class TransformationManager:
             if tbl_alias:
                 right_df = right_df.alias(tbl_alias)
 
+            joined_dfs[tbl_alias] = right_df
+
             if j.get("broadcast"):
                 right_df = F.broadcast(right_df)
 
@@ -63,9 +72,11 @@ class TransformationManager:
             else:
                 df = df.join(right_df, how=how)
 
-        return df
+        return df, joined_dfs
 
-    def _apply_rules(self, df: DataFrame, rules_meta: List[Dict[str, Any]]) -> DataFrame:
+    def _apply_rules(
+        self, df: DataFrame, rules_meta: List[Dict[str, Any]], joined_dfs: Dict[str, DataFrame]
+    ) -> DataFrame:
         processed_columns: Set[str] = set()
         raw_except_list: List[str] = []
         select_rest_enabled = False
@@ -102,39 +113,54 @@ class TransformationManager:
                 select_rest_enabled = rest_cfg.get("enable", False)
                 raw_except_list = rest_cfg.get("except", [])
 
-        # STAGE 3: DROP EXCLUDED COLUMNS (DISAMBIGUATED)
+        # STAGE 3: DROP EXCLUDED COLUMNS
         if select_rest_enabled:
-            df = self._drop_except_columns(df, raw_except_list, processed_columns)
+            df = self._drop_except_columns(df, raw_except_list, processed_columns, joined_dfs)
 
         return df
 
     def _drop_except_columns(
-        self, df: DataFrame, raw_except_list: List[str], processed_columns: Set[str]
+        self,
+        df: DataFrame,
+        raw_except_list: List[str],
+        processed_columns: Set[str],
+        joined_dfs: Dict[str, DataFrame],
     ) -> DataFrame:
-        """Handles dropping columns safely, supporting both aliased (e.g.
+        """Safely drops columns specified in the except list, resolving ambiguity
 
-        c.status) and plain (e.g. nickname) column names without
-        Ambiguous Reference errors.
+        for aliased join columns like `c.status` or `s.status`.
         """
         for item in raw_except_list:
             item_clean = item.replace("`", "").strip()
-
-            # Skip dropping if column was modified or dynamically generated in STAGE 2
             norm_name = self._normalize_col_name(item_clean)
+
+            # Skip dropping if this was created as a new column in STAGE 2
             if norm_name in processed_columns:
                 continue
 
             if "." in item_clean:
-                # Aliased column specification (e.g. "c.status" or "s.status")
                 alias_part, col_part = item_clean.split(".", 1)
+                
+                # If we tracked the aliased DataFrame, drop using its exact column reference
+                if alias_part in joined_dfs:
+                    target_df = joined_dfs[alias_part]
+                    try:
+                        df = df.drop(target_df[col_part])
+                        continue
+                    except Exception:
+                        pass
+                
+                # Fallback drop attempt using backticked column spec
                 try:
-                    df = df.drop(F.col(f"`{alias_part}`.`{col_part}`"))
+                    df = df.drop(F.col(f"{alias_part}.{col_part}"))
                 except Exception:
-                    # Fallback to plain drop if alias resolution is not directly accessible
                     df = df.drop(col_part)
             else:
-                # Unaliased column specification
-                df = df.drop(item_clean)
+                # Direct unaliased column drop
+                try:
+                    df = df.drop(item_clean)
+                except Exception:
+                    pass
 
         return df
 
