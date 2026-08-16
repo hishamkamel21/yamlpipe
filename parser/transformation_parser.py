@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Set
 from yamlpipe.registry.transformation_registry import TransformationRegistry
 
 logger = logging.getLogger("TransformationParser")
@@ -10,7 +10,9 @@ class TransformationParser:
     @classmethod
     def parse(cls, raw_config: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(raw_config, dict):
-            raise TypeError(f"[TransformationParser Error] Expected dict configuration, got {type(raw_config).__name__}")
+            raise TypeError(
+                f"[TransformationParser Error] Expected dict configuration, got {type(raw_config).__name__}"
+            )
 
         # Clean non-breaking spaces (\xa0) and key whitespace
         clean_config = cls._sanitize_dict(raw_config)
@@ -37,24 +39,47 @@ class TransformationParser:
                     expanded = TransformationRegistry.process_rule(sanitized_rule)
                     parsed_rules.extend(expanded)
 
+        # 3. Extract Function References Directly
+        contained_functions = sorted(list(cls._extract_function_names(clean_config)))
+
         return {
             "table": raw_table,
             "alias": main_alias,
             "joins": parsed_joins,
             "rules": parsed_rules,
-            "ContainVarsFrom": clean_config.get("ContainVarsFrom", [])
+            "ContainVarsFrom": clean_config.get("ContainVarsFrom", []),
+            "ContainFunctionsFrom": contained_functions,
         }
+
+    @classmethod
+    def _extract_function_names(cls, data: Any) -> Set[str]:
+        """Recursively scans configuration dictionary for 'call_function' references."""
+        found_funcs: Set[str] = set()
+
+        if isinstance(data, dict):
+            for k, v in data.items():
+                if k == "call_function" and isinstance(v, str):
+                    found_funcs.add(v.strip())
+                else:
+                    found_funcs.update(cls._extract_function_names(v))
+        elif isinstance(data, list):
+            for item in data:
+                found_funcs.update(cls._extract_function_names(item))
+
+        return found_funcs
 
     @classmethod
     def _sanitize_dict(cls, d: Dict[str, Any]) -> Dict[str, Any]:
         """Recursively removes non-breaking spaces (\xa0) and whitespace from keys."""
         sanitized = {}
         for k, v in d.items():
-            clean_k = str(k).replace('\xa0', '').strip()
+            clean_k = str(k).replace("\xa0", "").strip()
             if isinstance(v, dict):
                 sanitized[clean_k] = cls._sanitize_dict(v)
             elif isinstance(v, list):
-                sanitized[clean_k] = [cls._sanitize_dict(i) if isinstance(i, dict) else i for i in v]
+                sanitized[clean_k] = [
+                    cls._sanitize_dict(i) if isinstance(i, dict) else i for i in v
+                ]
             else:
                 sanitized[clean_k] = v
         return sanitized
@@ -66,7 +91,10 @@ class TransformationParser:
         how = join_cfg.get("how", join_cfg.get("type", "left")).lower()
         broadcast = bool(join_cfg.get("broadcast", False))
         on_clause = join_cfg.get("on_clause") or join_cfg.get("on", "")
-        sql_clause = join_cfg.get("sql") or f"{how.upper()} JOIN {target_table} AS `{tbl_alias}` ON {on_clause}"
+        sql_clause = (
+            join_cfg.get("sql")
+            or f"{how.upper()} JOIN {target_table} AS `{tbl_alias}` ON {on_clause}"
+        )
 
         return {
             "table": target_table,
@@ -74,5 +102,5 @@ class TransformationParser:
             "how": how,
             "broadcast": broadcast,
             "on_clause": on_clause,
-            "sql": sql_clause
+            "sql": sql_clause,
         }
