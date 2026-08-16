@@ -67,7 +67,7 @@ class TransformationManager:
 
     def _apply_rules(self, df: DataFrame, rules_meta: List[Dict[str, Any]]) -> DataFrame:
         processed_columns: Set[str] = set()
-        cols_to_except: Set[str] = set()
+        raw_except_list: List[str] = []
         select_rest_enabled = False
 
         for rule in rules_meta:
@@ -96,19 +96,45 @@ class TransformationManager:
                                 df = df.withColumn(out_col, F.col(f"`{target_col}`.{field}"))
                                 processed_columns.add(self._normalize_col_name(out_col))
 
-            # CASE 3: Select The Rest
+            # CASE 3: Select The Rest Config
             elif "select_the_rest" in rule:
                 rest_cfg = rule["select_the_rest"]
                 select_rest_enabled = rest_cfg.get("enable", False)
-                raw_except = rest_cfg.get("except", [])
-                cols_to_except.update(self._normalize_col_name(c) for c in raw_except)
+                raw_except_list = rest_cfg.get("except", [])
 
-        # STAGE 3: DROP EXCLUDED COLUMNS
+        # STAGE 3: DROP EXCLUDED COLUMNS (DISAMBIGUATED)
         if select_rest_enabled:
-            for c in df.columns:
-                norm_c = self._normalize_col_name(c)
-                if norm_c in cols_to_except and norm_c not in processed_columns:
-                    df = df.drop(F.col(c))
+            df = self._drop_except_columns(df, raw_except_list, processed_columns)
+
+        return df
+
+    def _drop_except_columns(
+        self, df: DataFrame, raw_except_list: List[str], processed_columns: Set[str]
+    ) -> DataFrame:
+        """Handles dropping columns safely, supporting both aliased (e.g.
+
+        c.status) and plain (e.g. nickname) column names without
+        Ambiguous Reference errors.
+        """
+        for item in raw_except_list:
+            item_clean = item.replace("`", "").strip()
+
+            # Skip dropping if column was modified or dynamically generated in STAGE 2
+            norm_name = self._normalize_col_name(item_clean)
+            if norm_name in processed_columns:
+                continue
+
+            if "." in item_clean:
+                # Aliased column specification (e.g. "c.status" or "s.status")
+                alias_part, col_part = item_clean.split(".", 1)
+                try:
+                    df = df.drop(F.col(f"`{alias_part}`.`{col_part}`"))
+                except Exception:
+                    # Fallback to plain drop if alias resolution is not directly accessible
+                    df = df.drop(col_part)
+            else:
+                # Unaliased column specification
+                df = df.drop(item_clean)
 
         return df
 
