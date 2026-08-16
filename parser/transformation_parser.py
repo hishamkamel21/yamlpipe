@@ -1,92 +1,78 @@
 import logging
 from typing import Dict, Any, List
-from yamlpipe.utility.module_loader import ModuleLoader
+from yamlpipe.registry.transformation_registry import TransformationRegistry
 
-logger = logging.getLogger("TransformationRegistry")
+logger = logging.getLogger("TransformationParser")
 
 
-class TransformationRegistry:
-
-    @classmethod
-    def process_rule(cls, rule_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Routes rule structures to dedicated handlers.
-        Returns a list of standardized rule definitions.
-        """
-        if "call_function" in rule_cfg:
-            return cls._handle_call_function(rule_cfg)
-        elif "select_the_rest" in rule_cfg:
-            return cls._handle_select_the_rest(rule_cfg)
-        elif "run" in rule_cfg:
-            return cls._handle_run(rule_cfg)
-        elif "column" in rule_cfg and "expression" in rule_cfg:
-            return cls._handle_column_expr(rule_cfg)
-        else:
-            return [rule_cfg]
+class TransformationParser:
 
     @classmethod
-    def _handle_call_function(cls, rule_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Loads function via ModuleLoader, substitutes ${col} parameter references,
-        executes custom Python function per column, and generates 'column'/'expression' dictionaries.
-        """
-        func_name = rule_cfg.get("call_function")
-        raw_params = rule_cfg.get("params", {})
-        columns = rule_cfg.get("columns", [])
+    def parse(cls, raw_config: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(raw_config, dict):
+            raise TypeError(f"[TransformationParser Error] Expected dict configuration, got {type(raw_config).__name__}")
 
-        resolved_rules = []
+        # Clean non-breaking spaces (\xa0) and key whitespace
+        clean_config = cls._sanitize_dict(raw_config)
 
-        for col in columns:
-            # Substitute ${col} or ${column} placeholders in function parameters
-            resolved_params = {}
-            for param_key, param_val in raw_params.items():
-                if isinstance(param_val, str):
-                    resolved_params[param_key] = param_val.replace("${col}", col).replace("${column}", col)
-                else:
-                    resolved_params[param_key] = param_val
+        raw_table = clean_config.get("table", "unknown_table")
+        main_alias = clean_config.get("alias", "c")
 
-            try:
-                # Load python file from functions/ and run handle_strings(col_name=col)
-                sql_expr = ModuleLoader.functions_loader(func_name, **resolved_params)
+        # 1. Parse Joins Configuration
+        raw_joins = clean_config.get("joins", [])
+        parsed_joins: List[Dict[str, Any]] = []
+        if isinstance(raw_joins, list):
+            for join_item in raw_joins:
+                if isinstance(join_item, dict):
+                    parsed_joins.append(cls._parse_join(cls._sanitize_dict(join_item)))
 
-                if not isinstance(sql_expr, str):
-                    raise TypeError(
-                        f"Function '{func_name}' returned {type(sql_expr).__name__}. Expected str SQL expression."
-                    )
+        # 2. Parse Rules via TransformationRegistry
+        raw_rules = clean_config.get("rules", [])
+        parsed_rules: List[Dict[str, Any]] = []
 
-                resolved_rules.append({
-                    "column": col,
-                    "expression": sql_expr
-                })
+        if isinstance(raw_rules, list):
+            for rule_item in raw_rules:
+                if isinstance(rule_item, dict):
+                    sanitized_rule = cls._sanitize_dict(rule_item)
+                    expanded = TransformationRegistry.process_rule(sanitized_rule)
+                    parsed_rules.extend(expanded)
 
-            except Exception as e:
-                logger.error(f"Error evaluating call_function '{func_name}' for column '{col}': {str(e)}")
-                raise e
-
-        return resolved_rules
+        return {
+            "table": raw_table,
+            "alias": main_alias,
+            "joins": parsed_joins,
+            "rules": parsed_rules,
+            "ContainVarsFrom": clean_config.get("ContainVarsFrom", [])
+        }
 
     @classmethod
-    def _handle_select_the_rest(cls, rule_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Parses select_the_rest directives into normalized structure."""
-        rest_cfg = rule_cfg.get("select_the_rest", {})
-        return [{
-            "select_the_rest": {
-                "enable": bool(rest_cfg.get("enable", False)),
-                "except": rest_cfg.get("except", [])
-            }
-        }]
+    def _sanitize_dict(cls, d: Dict[str, Any]) -> Dict[str, Any]:
+        """Recursively removes non-breaking spaces (\xa0) and whitespace from keys."""
+        sanitized = {}
+        for k, v in d.items():
+            clean_k = str(k).replace('\xa0', '').strip()
+            if isinstance(v, dict):
+                sanitized[clean_k] = cls._sanitize_dict(v)
+            elif isinstance(v, list):
+                sanitized[clean_k] = [cls._sanitize_dict(i) if isinstance(i, dict) else i for i in v]
+            else:
+                sanitized[clean_k] = v
+        return sanitized
 
     @classmethod
-    def _handle_run(cls, rule_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Parses run expressions (e.g., location.*)."""
-        return [{
-            "run": str(rule_cfg.get("run", "")).strip()
-        }]
+    def _parse_join(cls, join_cfg: Dict[str, Any]) -> Dict[str, Any]:
+        target_table = join_cfg.get("table", "")
+        tbl_alias = join_cfg.get("alias") or target_table
+        how = join_cfg.get("how", join_cfg.get("type", "left")).lower()
+        broadcast = bool(join_cfg.get("broadcast", False))
+        on_clause = join_cfg.get("on_clause") or join_cfg.get("on", "")
+        sql_clause = join_cfg.get("sql") or f"{how.upper()} JOIN {target_table} AS `{tbl_alias}` ON {on_clause}"
 
-    @classmethod
-    def _handle_column_expr(cls, rule_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Parses standard column expression rules."""
-        return [{
-            "column": str(rule_cfg.get("column", "")).strip(),
-            "expression": str(rule_cfg.get("expression", "")).strip()
-        }]
+        return {
+            "table": target_table,
+            "alias": tbl_alias,
+            "how": how,
+            "broadcast": broadcast,
+            "on_clause": on_clause,
+            "sql": sql_clause
+        }
