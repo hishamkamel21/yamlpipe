@@ -6,7 +6,7 @@ from yamlpipe.core.vars_manager import VariablesManager
 from yamlpipe.registry.columns_quality_registry import ColumnQualityRegistry
 from yamlpipe.parser.schema_checks_parser import SchemaQualityParser
 from yamlpipe.parser.table_quality_parser import TableQualityParser
-
+from yamlpipe.parser.columns_quality_parser import ColumnQualityParser
 
 class QualityChecksParser:
 
