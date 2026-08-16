@@ -124,13 +124,12 @@ class TransformationManager:
         return df
 
     def resolve_select_the_rest(
-        self,
-        df: DataFrame,
-        except_list: List[str],
-        already_selected_cols: Set[str],
-        joined_dfs: Dict[str, DataFrame],
+    self,
+    df: DataFrame,
+    except_list: List[str],
+    already_selected_cols: Set[str],
+    joined_dfs: Dict[str, DataFrame],
     ) -> DataFrame:
-        # هنا الـ Prefixes بتفضل زي ما هي لتمييز الأعمدة بـ accuracy عالية
         excluded_qualified: Set[str] = set()
         excluded_simple: Set[str] = set()
 
@@ -141,37 +140,48 @@ class TransformationManager:
             else:
                 excluded_simple.add(item_clean)
 
-        # إسقاط الأعمدة المستثناة الصريحة الجاية من الـ Joins
-        right_cols_to_drop = []
+        # 1. مسح الأعمدة المعرفة بـ Alias صريح (سواء كان c.status أو s.status)
         for qual in excluded_qualified:
             alias_part, col_part = qual.split(".", 1)
+            
+            # لو كولوم جاى من Right Table في الـ Join
             if alias_part in joined_dfs and alias_part != self.main_alias:
-                right_cols_to_drop.append(joined_dfs[alias_part][col_part])
+                try:
+                    df = df.drop(joined_dfs[alias_part][col_part])
+                except Exception as e:
+                    logger.warning(f"Failed to drop qualified column {qual}: {e}")
+            
+            # لو كولوم جاى من Main Table (مثلاً c.status)
+            elif alias_part == self.main_alias:
+                # هنضيف اسمه المجرّد لقائمة الاستثناءات البسيطة عشان يتجاهله الـ Select
+                excluded_simple.add(col_part)
 
-        for col_ref in right_cols_to_drop:
-            try:
-                df = df.drop(col_ref)
-            except Exception as e:
-                logger.warning(f"Failed to drop qualified column {col_ref}: {e}")
-
+        # 2. بناء قائمة الأعمدة المطلوبة وتفادي التكرار (Deduplication)
         cols_to_select = []
-        main_df = joined_dfs.get(self.main_alias)
+        seen_output_names = set()
 
         for col_name in df.columns:
             plain_name = self._strip_prefix(col_name)
 
-            if col_name in already_selected_cols or plain_name in already_selected_cols:
-                cols_to_select.append(col_name)
-                continue
-
+            # لو العمود ده مستثنى صراحة (سواء بالاسم المباشر أو بعد فك c.status)
             if col_name in excluded_simple or plain_name in excluded_simple:
                 continue
 
-            # اختيار العمود المتبقي
-            if main_df and col_name in main_df.columns:
-                cols_to_select.append(main_df[col_name])
-            else:
-                cols_to_select.append(col_name)
+            # لو العمود تم إضافته بالفعل عبر الـ Rules أو مختار سابقاً
+            if col_name in already_selected_cols or plain_name in already_selected_cols:
+                if plain_name not in seen_output_names:
+                    cols_to_select.append(col_name)
+                    seen_output_names.add(plain_name)
+                continue
+
+            # اختيار باقي الأعمدة المتبقية بدون تكرار أسماء
+            if plain_name not in seen_output_names:
+                main_df = joined_dfs.get(self.main_alias)
+                if main_df and col_name in main_df.columns:
+                    cols_to_select.append(main_df[col_name])
+                else:
+                    cols_to_select.append(col_name)
+                seen_output_names.add(plain_name)
 
         return df.select(*cols_to_select)
 
