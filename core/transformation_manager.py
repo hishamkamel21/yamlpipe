@@ -133,6 +133,7 @@ class TransformationManager:
         excluded_qualified: Set[str] = set()
         excluded_simple: Set[str] = set()
 
+        # 1. تفكيك قائمة الاستثناءات
         for item in except_list:
             item_clean = item.replace("`", "").strip()
             if "." in item_clean:
@@ -140,44 +141,47 @@ class TransformationManager:
             else:
                 excluded_simple.add(item_clean)
 
-        # 1. مسح الأعمدة المعرفة بـ Alias صريح (سواء كان c.status أو s.status)
-        for qual in excluded_qualified:
+        # 2. تحديد بالضبط الأعمدة المطلوب إسقاطها بحسب جدولها (Ref-based Drop)
+        # مسح أي عمود مستثنى جاي من Right Tables (مثل s.status أو s.nickname)
+        for qual in list(excluded_qualified):
             alias_part, col_part = qual.split(".", 1)
-            
-            # لو كولوم جاى من Right Table في الـ Join
             if alias_part in joined_dfs and alias_part != self.main_alias:
-                try:
-                    df = df.drop(joined_dfs[alias_part][col_part])
-                except Exception as e:
-                    logger.warning(f"Failed to drop qualified column {qual}: {e}")
-            
-            # لو كولوم جاى من Main Table (مثلاً c.status)
-            elif alias_part == self.main_alias:
-                # هنضيف اسمه المجرّد لقائمة الاستثناءات البسيطة عشان يتجاهله الـ Select
-                excluded_simple.add(col_part)
+                right_df = joined_dfs[alias_part]
+                if col_part in right_df.columns:
+                    try:
+                        df = df.drop(right_df[col_part])
+                    except Exception as e:
+                        logger.warning(f"Failed to drop right-table column {qual}: {e}")
 
-        # 2. بناء قائمة الأعمدة المطلوبة وتفادي التكرار (Deduplication)
+        # 3. بناء الـ Selected Columns مع التمييز بين c.status و s.status
+        main_df = joined_dfs.get(self.main_alias)
         cols_to_select = []
         seen_output_names = set()
 
         for col_name in df.columns:
             plain_name = self._strip_prefix(col_name)
 
-            # لو العمود ده مستثنى صراحة (سواء بالاسم المباشر أو بعد فك c.status)
+            # فحص هل هذا العمود بالذات هو القادم من الـ Main Table (c)؟
+            is_from_main = main_df is not None and col_name in main_df.columns
+
+            # حالة 1: استثناء c.status بشكل محدد من الجدول الرئيسي
+            if is_from_main and f"{self.main_alias}.{plain_name}" in excluded_qualified:
+                continue
+
+            # حالة 2: استثناء الأعمدة المكتوبة بدون Alias (Simple Except)
             if col_name in excluded_simple or plain_name in excluded_simple:
                 continue
 
-            # لو العمود تم إضافته بالفعل عبر الـ Rules أو مختار سابقاً
+            # حالة 3: الأولوية للأعمدة المنشأة في الـ Rules
             if col_name in already_selected_cols or plain_name in already_selected_cols:
                 if plain_name not in seen_output_names:
                     cols_to_select.append(col_name)
                     seen_output_names.add(plain_name)
                 continue
 
-            # اختيار باقي الأعمدة المتبقية بدون تكرار أسماء
+            # حالة 4: إضافة الأعمدة المتبقية مع ضمان عدم تكرار الاسم في الناتج
             if plain_name not in seen_output_names:
-                main_df = joined_dfs.get(self.main_alias)
-                if main_df and col_name in main_df.columns:
+                if is_from_main:
                     cols_to_select.append(main_df[col_name])
                 else:
                     cols_to_select.append(col_name)
