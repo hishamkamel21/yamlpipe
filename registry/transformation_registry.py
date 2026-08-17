@@ -1,8 +1,6 @@
-# yamlpipe/registry/transformation_registry.py
-
 import logging
 from typing import Dict, Any, List
-from yamlpipe.utility.placeholder_resolver import TemplateResolver
+from yamlpipe.utility.template_resolver import TemplateResolver
 
 logger = logging.getLogger("TransformationRegistry")
 
@@ -11,9 +9,11 @@ class TransformationRegistry:
 
     @classmethod
     def process_rule(cls, rule_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+        has_multi_col = "columns" in rule_cfg or "for_each" in rule_cfg
+
         if "call_function" in rule_cfg:
             return cls._handle_call_function(rule_cfg)
-        elif "expression" in rule_cfg and "columns" in rule_cfg:
+        elif "expression" in rule_cfg and has_multi_col:
             return cls._handle_template_expression(rule_cfg)
         elif "select_the_rest" in rule_cfg:
             return cls._handle_select_the_rest(rule_cfg)
@@ -26,31 +26,23 @@ class TransformationRegistry:
 
     @classmethod
     def _handle_template_expression(cls, rule_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
-        raw_expr = rule_cfg.get("expression", "")
-        columns = rule_cfg.get("columns", [])
-
+        expanded = TemplateResolver.resolve_and_expand(rule_cfg)
         resolved_rules = []
-        for col in columns:
-            resolved_expr = TemplateResolver.resolve_placeholders(raw_expr, col)
+        for payload, col in expanded:
             resolved_rules.append({
                 "column": col,
-                "expression": str(resolved_expr).strip()
+                "expression": str(payload.get("expression", "")).strip()
             })
-
         return resolved_rules
 
     @classmethod
     def _handle_call_function(cls, rule_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         func_name = rule_cfg.get("call_function")
-        raw_params = rule_cfg.get("params", {})
-        columns = rule_cfg.get("columns", [])
-
+        expanded = TemplateResolver.resolve_and_expand(rule_cfg)
         resolved_rules = []
 
-        for col in columns:
-            # استخدام الـ Resolver الموحد لحل الـ params
-            resolved_params = TemplateResolver.resolve_placeholders(raw_params, col)
-
+        for payload, col in expanded:
+            resolved_params = payload.get("params", {})
             try:
                 from yamlpipe.utility.module_loader import ModuleLoader
                 sql_expr = ModuleLoader.functions_loader(func_name, **resolved_params)

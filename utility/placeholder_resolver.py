@@ -1,5 +1,4 @@
-
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Tuple
 
 
 class TemplateResolver:
@@ -7,20 +6,53 @@ class TemplateResolver:
     @classmethod
     def resolve_placeholders(cls, data: Any, col_name: str) -> Any:
         """
-        Recursively resolves placeholders like ${col} or ${column} 
-        with the actual column name across strings, dicts, and lists.
+        Recursively replaces ${col} and ${column} placeholders with col_name inside any data structure.
         """
         if isinstance(data, str):
             return data.replace("${col}", col_name).replace("${column}", col_name)
 
         elif isinstance(data, dict):
-            resolved_dict: Dict[str, Any] = {}
-            for k, v in data.items():
-                clean_key = cls.resolve_placeholders(k, col_name)
-                resolved_dict[clean_key] = cls.resolve_placeholders(v, col_name)
-            return resolved_dict
+            return {
+                cls.resolve_placeholders(k, col_name): cls.resolve_placeholders(v, col_name)
+                for k, v in data.items()
+            }
 
         elif isinstance(data, list):
             return [cls.resolve_placeholders(item, col_name) for item in data]
 
         return data
+
+    @classmethod
+    def resolve_and_expand(cls, config: Dict[str, Any]) -> List[Tuple[Dict[str, Any], str]]:
+        """
+        Generic expansion: Checks for 'for_each' or 'columns' list.
+        Duplicates the config dict per column and resolves all placeholders generically.
+        Returns a list of tuples: [(resolved_config_dict, column_name), ...]
+        """
+        # Accept either 'for_each' or 'columns' key
+        target_columns = config.get("for_each") or config.get("columns") or []
+
+        # Fallback if target_columns is a single string instead of a list
+        if isinstance(target_columns, str):
+            target_columns = [target_columns]
+
+        if not isinstance(target_columns, list) or not target_columns:
+            single_col = config.get("column")
+            if single_col and isinstance(single_col, str):
+                clean_col = single_col.strip()
+                resolved = cls.resolve_placeholders(config, clean_col)
+                return [(resolved, clean_col)]
+            return [(config, "")]
+
+        expanded = []
+        # Exclude iteration keys from payload to keep resolved payload clean
+        payload_keys = [k for k in config.keys() if k not in ("columns", "for_each")]
+
+        for col in target_columns:
+            if isinstance(col, str) and col.strip():
+                clean_col = col.strip()
+                payload = {k: config[k] for k in payload_keys}
+                resolved_payload = cls.resolve_placeholders(payload, clean_col)
+                expanded.append((resolved_payload, clean_col))
+
+        return expanded
