@@ -9,6 +9,12 @@ logger = logging.getLogger("ColumnQualityParser")
 
 class ColumnQualityParser:
 
+    ALLOWED_MULTI_COLUMN_CHECK_TYPES: Set[str] = {
+        "custom",
+        "compare",
+        "compare_columns",
+    }
+
     @classmethod
     def parse_yaml_checks(cls, yaml_config: Dict[str, Any]) -> Dict[str, Any]:
         columns_checks_config = yaml_config.get("columns_checks", [])
@@ -78,7 +84,7 @@ class ColumnQualityParser:
         column_name = entry.get("column")
         check_type = entry.get("check_type") or entry.get("type")
 
-        # Column-First Format (e.g., column: booking_id, checks: [...])
+        # 1. Column-First Format (e.g., column: nights, checks: [...])
         if column_name:
             if VariablesManager.is_var(column_name):
                 raise ValueError(f"Column-First format cannot use variables for 'column': '{column_name}'")
@@ -90,15 +96,30 @@ class ColumnQualityParser:
                 resolved_check = TemplateResolver.resolve_placeholders(check, column_name)
                 yield resolved_check, column_name
 
-        # Check-First Format (e.g., check_type: custom, for_each: [check_in_date, check_out_date])
+        # 2. Check-First Format (e.g., check_type: custom, check_type: not_null)
         elif check_type:
             if VariablesManager.is_var(check_type):
                 raise ValueError(f"Check-First format cannot use variables for 'check_type': '{check_type}'")
 
+            check_type_str = str(check_type).lower().strip()
+            has_iteration_list = bool(entry.get("columns") or entry.get("for_each"))
+
+            # Validation: Non-multi-column check types MUST specify 'columns' or 'for_each'
+            if not has_iteration_list and check_type_str not in cls.ALLOWED_MULTI_COLUMN_CHECK_TYPES:
+                raise ValueError(
+                    f"Check-First entry with check_type '{check_type}' requires a 'columns' or 'for_each' list."
+                )
+
             expanded_checks = TemplateResolver.resolve_and_expand(entry)
             for resolved_payload, col in expanded_checks:
-                if col:
-                    yield resolved_payload, col
+                # If col is empty (table/multi-column check without iteration), derive fallback alias from the_check or check_type
+                fallback_col = col or (
+                    resolved_payload.get("name")
+                    or resolved_payload.get("the_check")
+                    or resolved_payload.get("check_type")
+                    or "table_check"
+                )
+                yield resolved_payload, fallback_col
 
         else:
             logger.warning("Skipping entry that matches neither Column-First nor Check-First format.")
