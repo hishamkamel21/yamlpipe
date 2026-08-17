@@ -1,5 +1,8 @@
+# yamlpipe/registry/transformation_registry.py
+
 import logging
 from typing import Dict, Any, List
+from yamlpipe.utility.placeholder_resolver import TemplateResolver
 
 logger = logging.getLogger("TransformationRegistry")
 
@@ -28,10 +31,10 @@ class TransformationRegistry:
 
         resolved_rules = []
         for col in columns:
-            resolved_expr = raw_expr.replace("${col}", col).replace("${column}", col)
+            resolved_expr = TemplateResolver.resolve_placeholders(raw_expr, col)
             resolved_rules.append({
                 "column": col,
-                "expression": resolved_expr.strip()
+                "expression": str(resolved_expr).strip()
             })
 
         return resolved_rules
@@ -45,15 +48,10 @@ class TransformationRegistry:
         resolved_rules = []
 
         for col in columns:
-            resolved_params = {}
-            for param_key, param_val in raw_params.items():
-                if isinstance(param_val, str):
-                    resolved_params[param_key] = param_val.replace("${col}", col).replace("${column}", col)
-                else:
-                    resolved_params[param_key] = param_val
+            # استخدام الـ Resolver الموحد لحل الـ params
+            resolved_params = TemplateResolver.resolve_placeholders(raw_params, col)
 
             try:
-                # Import dynamically inside method to avoid circular import issues
                 from yamlpipe.utility.module_loader import ModuleLoader
                 sql_expr = ModuleLoader.functions_loader(func_name, **resolved_params)
 

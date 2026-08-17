@@ -1,7 +1,10 @@
+# yamlpipe/core/column_quality_parser.py
+
 import logging
 from typing import Any, Dict, Generator, List, Set, Tuple
 from yamlpipe.core.vars_manager import VariablesManager
 from yamlpipe.registry.columns_quality_registry import ColumnQualityRegistry
+from yamlpipe.utility.placeholder_resolver import TemplateResolver
 
 logger = logging.getLogger("ColumnQualityParser")
 
@@ -107,7 +110,8 @@ class ColumnQualityParser:
                 if VariablesManager.is_var(sub_severity):
                     raise ValueError(f"Severity inside Column-First format cannot be a variable: '{sub_severity}'")
 
-                yield check, column_name
+                resolved_check = TemplateResolver.resolve_placeholders(check, column_name)
+                yield resolved_check, column_name
 
         # Check-First Format
         elif check_type:
@@ -127,7 +131,10 @@ class ColumnQualityParser:
 
             for col in target_columns:
                 if isinstance(col, str) and col.strip():
-                    yield check_payload, col.strip()
+                    clean_col = col.strip()
+                    # حل الـ Placeholders الموحد (مثل col_name: ${col}) قبل تسليمها للـ Registry
+                    resolved_payload = TemplateResolver.resolve_placeholders(check_payload, clean_col)
+                    yield resolved_payload, clean_col
                 else:
                     logger.warning(f"Skipping invalid column name '{col}' in check '{check_type}'.")
 
