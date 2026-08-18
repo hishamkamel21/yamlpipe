@@ -107,26 +107,16 @@ class TransformationManager:
             # 2. General RUN Execution Logic (Struct Unpacking OR Arbitrary SQL Expr)
             elif "run" in rule:
                 run_expr = rule["run"].strip()
-                
-                # Case A: Struct Unpacking (e.g., run: "location.*")
-                if run_expr.endswith(".*"):
-                    col_prefix = run_expr[:-2]
-                    matching_cols = [c for c in df.columns if c == col_prefix or c.endswith(f".{col_prefix}")]
-                    if matching_cols:
-                        target_col = matching_cols[0]
-                        schema_field = next((f for f in df.schema.fields if f.name == target_col), None)
-                        if schema_field and hasattr(schema_field.dataType, "names"):
-                            for field in schema_field.dataType.names:
-                                # تغيير هنا: استخدام اسم الحقل الداخلي فقط بدون PREFIX
-                                out_col = field
-                                df = df.withColumn(out_col, F.col(f"`{target_col}`.{field}"))
-                                already_selected_cols.add(out_col)
-
-                # Case B: Arbitrary SQL Expression
-                else:
+                if run_expr:
                     sanitized_run_expr = self._sanitize_expression_quotes(run_expr)
+                    
+                    cols_before = set(df.columns)
+                    
                     df = df.selectExpr("*", sanitized_run_expr)
                     
+                    new_cols = set(df.columns) - cols_before
+                    already_selected_cols.update(new_cols)
+
             # 3. Select The Rest Processing
             elif "select_the_rest" in rule:
                 rest_cfg = rule["select_the_rest"]
