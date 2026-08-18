@@ -1,3 +1,5 @@
+
+
 import logging
 import re
 from typing import Dict, Any, List, Set, Tuple
@@ -29,7 +31,7 @@ class TransformationManager:
         logger.info(f"Applying DataFrame transformations for table '{self.table_name}'...")
         
         joined_dfs: Dict[str, DataFrame] = {}
-        current_df = self.df.alias(self.main_alias)
+        current_df = self.df
         joined_dfs[self.main_alias] = current_df
 
         stages = self.parsed_config.get("stages", [])
@@ -39,7 +41,10 @@ class TransformationManager:
             stage_data = stage.get("data", [])
 
             if stage_type == "joins":
-                logger.info(f"Executing Stage {stage_idx}: JOINS...")
+                logger.info(f"Executing Stage {stage_idx}: JOINS...")                
+                current_df = current_df.alias(self.main_alias)
+                joined_dfs[self.main_alias] = current_df
+                
                 current_df, joined_dfs = self._apply_joins(current_df, stage_data, joined_dfs)
 
             elif stage_type == "rules":
@@ -48,7 +53,7 @@ class TransformationManager:
 
         logger.info(f"Successfully applied transformations for '{self.table_name}'.")
         return current_df
-
+    
     def _apply_joins(
         self, df: DataFrame, joins_meta: List[Dict[str, Any]], joined_dfs: Dict[str, DataFrame]
     ) -> Tuple[DataFrame, Dict[str, DataFrame]]:
