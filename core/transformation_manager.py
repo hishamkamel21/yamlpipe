@@ -62,28 +62,43 @@ class TransformationManager:
             if not isinstance(rule, dict):
                 continue
 
+            # Standard column/expression rule
             if "column" in rule and "expression" in rule:
                 raw_col = rule["column"].strip()
                 target_col = self._strip_prefix(raw_col)
                 expr_str = self._sanitize_expression_quotes(rule["expression"].strip())
                 
                 df = df.withColumn(target_col, F.expr(expr_str))
-                
                 already_selected_cols.add(target_col)
                 already_selected_cols.add(raw_col)
 
+            # Fix for "run" blocks: parses multi-line expressions safely without breaking on math '*'
             elif "run" in rule:
                 run_expr = rule["run"].strip()
                 if run_expr:
                     sanitized_run_expr = self._sanitize_expression_quotes(run_expr)
-                    cols_before = set(df.columns)
                     
-                    raw_lines = [line.strip().rstrip(",") for line in sanitized_run_expr.splitlines() if line.strip()]
+                    # Split multi-expression run blocks cleanly by commas outside of parentheses
+                    raw_lines = [
+                        line.strip().rstrip(",") 
+                        for line in sanitized_run_expr.splitlines() 
+                        if line.strip()
+                    ]
                     
                     if raw_lines:
-                        df = df.selectExpr("*", *raw_lines)
-                        new_cols = set(df.columns) - cols_before
-                        already_selected_cols.update(new_cols)
+                        # Join lines into single executable string statements
+                        full_block = " ".join(raw_lines)
+                        expressions = [e.strip() for e in re.split(r',\s*(?![^()]*\))', full_block) if e.strip()]
+                        
+                        for expr in expressions:
+                            if " as " in expr.lower():
+                                parts = re.split(r'\s+as\s+', expr, flags=re.IGNORECASE)
+                                expr_body = parts[0].strip()
+                                alias_name = parts[1].strip().replace("`", "")
+                                df = df.withColumn(alias_name, F.expr(expr_body))
+                                already_selected_cols.add(alias_name)
+                            else:
+                                df = df.selectExpr("*", expr)
 
             elif "select_the_rest" in rule:
                 rest_cfg = rule["select_the_rest"]
@@ -130,6 +145,9 @@ class TransformationManager:
         selected_expressions = []
         processed_target_cols = set()
 
+        # Check if joins were actually applied in the execution pipeline
+        has_joins = len(joined_dfs) > 1
+
         for alias in self.registered_aliases:
             alias_lower = alias.lower()
             source_df = joined_dfs.get(alias)
@@ -150,7 +168,12 @@ class TransformationManager:
                     continue
 
                 if col_lower not in processed_target_cols:
-                    selected_expressions.append(F.col(f"`{alias}`.`{col_name}`").alias(col_name))
+                    # Fix: If no joins were executed, do NOT qualify with table alias prefix
+                    if has_joins:
+                        selected_expressions.append(F.col(f"`{alias}`.`{col_name}`").alias(col_name))
+                    else:
+                        selected_expressions.append(F.col(f"`{col_name}`"))
+                    
                     processed_target_cols.add(col_lower)
 
         if selected_expressions:
@@ -162,7 +185,7 @@ class TransformationManager:
             return final_df
 
         return df
-    
+
     def _apply_joins(
         self, main_df: DataFrame, joins_config: List[Dict[str, Any]], joined_dfs: Dict[str, DataFrame]
     ) -> Tuple[DataFrame, Dict[str, DataFrame]]:
@@ -191,5 +214,4 @@ class TransformationManager:
         return col_name
 
     def _sanitize_expression_quotes(self, expr_str: str) -> str:
-        # Replaces double quotes with single quotes inside SQL string literals
         return re.sub(r'(?<!\\)"([^"\\]*(?:\\.[^"\\]*)*)"', r"'\1'", expr_str)
