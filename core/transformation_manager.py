@@ -107,35 +107,62 @@ class TransformationManager:
         already_selected_cols: Set[str],
         joined_dfs: Dict[str, DataFrame],
     ) -> DataFrame:
-        logger.info("Resolving 'select_the_rest' columns...")
-        
-        # Clean except items and track prefix dependencies
-        cleaned_except = {self._strip_prefix(col).lower() for col in except_list if isinstance(col, str)}
-        raw_except_set = {col.strip().lower() for col in except_list if isinstance(col, str)}
-        already_selected_lower = {col.lower() for col in already_selected_cols}
+        logger.info("Resolving 'select_the_rest' with explicit Alias-based inclusion/exclusion...")
 
-        cols_to_keep = []
+        explicit_except_map: Dict[str, Set[str]] = {alias.lower(): set() for alias in self.registered_aliases}
+        global_except_set: Set[str] = set()
 
-        for col in df.columns:
-            col_lower = col.lower()
-            clean_col_lower = self._strip_prefix(col).lower()
-
-            # Skip if explicitly excluded in except list or already selected by previous rules
-            if col_lower in raw_except_set or clean_col_lower in cleaned_except:
+        for col in except_list:
+            if not isinstance(col, str):
                 continue
-            if col_lower in already_selected_lower or clean_col_lower in already_selected_lower:
+            col_str = col.strip().lower()
+            if "." in col_str:
+                prefix, col_name = col_str.split(".", 1)
+                if prefix in explicit_except_map:
+                    explicit_except_map[prefix].add(col_name)
+                else:
+                    global_except_set.add(col_name)
+            else:
+                global_except_set.add(col_str)
+
+        already_selected_lower = {self._strip_prefix(c).lower() for c in already_selected_cols}
+
+        selected_expressions = []
+        processed_target_cols = set()
+
+        for alias in self.registered_aliases:
+            alias_lower = alias.lower()
+            source_df = joined_dfs.get(alias)
+
+            if source_df is None:
                 continue
 
-            cols_to_keep.append(col)
+            for col_name in source_df.columns:
+                col_lower = col_name.lower()
 
-        if cols_to_keep:
-            logger.info(f"Retaining remaining columns: {cols_to_keep}")
-            # Ensure unique column selection maintaining order
-            select_exprs = [F.col(f"`{col}`") for col in df.columns if col in set(cols_to_keep) or col in already_selected_cols]
-            df = df.select(*select_exprs)
+                if col_lower in already_selected_lower:
+                    continue
+
+                if col_lower in explicit_except_map.get(alias_lower, set()):
+                    continue
+
+                if col_lower in global_except_set:
+                    continue
+
+                if col_lower not in processed_target_cols:
+                    selected_expressions.append(F.col(f"`{alias}`.`{col_name}`").alias(col_name))
+                    processed_target_cols.add(col_lower)
+
+        if selected_expressions:
+            logger.info(f"Retained columns via Alias resolve: {[col for col in processed_target_cols]}")
+            
+            current_cols = [F.col(f"`{c}`") for c in df.columns if self._strip_prefix(c).lower() in already_selected_lower]
+            
+            final_df = df.select(*current_cols, *selected_expressions)
+            return final_df
 
         return df
-
+    
     def _apply_joins(
         self, main_df: DataFrame, joins_config: List[Dict[str, Any]], joined_dfs: Dict[str, DataFrame]
     ) -> Tuple[DataFrame, Dict[str, DataFrame]]:
