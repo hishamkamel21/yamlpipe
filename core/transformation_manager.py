@@ -55,8 +55,6 @@ class TransformationManager:
         self, df: DataFrame, rules_meta: List[Dict[str, Any]], joined_dfs: Dict[str, DataFrame]
     ) -> DataFrame:
         already_selected_cols: Set[str] = set()
-        raw_except_list: List[str] = []
-        select_rest_enabled = False
 
         for rule in rules_meta:
             if not isinstance(rule, dict):
@@ -97,29 +95,47 @@ class TransformationManager:
                             else:
                                 df = df.selectExpr("*", expr)
 
-            elif "select_the_rest" in rule:
-                rest_cfg = rule["select_the_rest"]
-                select_rest_enabled = rest_cfg.get("enable", False)
-                raw_except_list = rest_cfg.get("except", [])
+            elif "select" in rule:
+                select_cfg = rule["select"]
+                
+                if isinstance(select_cfg, str):
+                    sanitized_expr = self._sanitize_expression_quotes(select_cfg.strip())
+                    raw_lines = [
+                        line.strip().rstrip(",")
+                        for line in sanitized_expr.splitlines()
+                        if line.strip()
+                    ]
+                    if raw_lines:
+                        full_expr_str = " , ".join(raw_lines)
+                        expr_list = [e.strip() for e in re.split(r',\s*(?![^()]*\))', full_expr_str) if e.strip()]
+                        df = df.selectExpr(*expr_list)
 
-        if select_rest_enabled:
-            df = self.resolve_select_the_rest(
-                df=df,
-                except_list=raw_except_list,
-                already_selected_cols=already_selected_cols,
-                joined_dfs=joined_dfs,
-            )
+                elif isinstance(select_cfg, list):
+                    select_cols = [str(c).strip() for c in select_cfg]
+                    df = df.select(*[F.col(f"`{c}`") for c in select_cols])
+
+                elif isinstance(select_cfg, dict):
+                    handled_enabled = select_cfg.get("handled_cols", False)
+                    raw_except_list = select_cfg.get("except", [])
+
+                    if handled_enabled:
+                        df = self.resolve_select_with_except(
+                            df=df,
+                            except_list=raw_except_list,
+                            already_selected_cols=already_selected_cols,
+                            joined_dfs=joined_dfs,
+                        )
 
         return df
 
-    def resolve_select_the_rest(
+    def resolve_select_with_except(
         self,
         df: DataFrame,
         except_list: List[str],
         already_selected_cols: Set[str],
         joined_dfs: Dict[str, DataFrame],
     ) -> DataFrame:
-        logger.info("Resolving 'select_the_rest' with explicit Alias-based inclusion/exclusion...")
+        logger.info("Resolving 'select' with handled_cols and except list...")
 
         explicit_except_map: Dict[str, Set[str]] = {alias.lower(): set() for alias in self.registered_aliases}
         global_except_set: Set[str] = set()
@@ -137,47 +153,42 @@ class TransformationManager:
             else:
                 global_except_set.add(col_str)
 
-        already_selected_lower = {self._strip_prefix(c).lower() for c in already_selected_cols}
+        all_candidate_cols: List[str] = list(df.columns)
+
+        has_joins = len(joined_dfs) > 1
+        for alias in self.registered_aliases:
+            source_df = joined_dfs.get(alias)
+            if source_df is not None:
+                for col_name in source_df.columns:
+                    if col_name not in all_candidate_cols:
+                        all_candidate_cols.append(col_name)
 
         selected_expressions = []
         processed_target_cols = set()
 
-        has_joins = len(joined_dfs) > 1
+        for col_name in all_candidate_cols:
+            col_stripped = self._strip_prefix(col_name)
+            col_lower = col_stripped.lower()
 
-        for alias in self.registered_aliases:
-            alias_lower = alias.lower()
-            source_df = joined_dfs.get(alias)
-
-            if source_df is None:
+            if col_lower in global_except_set:
                 continue
 
-            for col_name in source_df.columns:
-                col_lower = col_name.lower()
+            if col_lower in explicit_except_map.get(self.main_alias.lower(), set()):
+                continue
 
-                if col_lower in already_selected_lower:
-                    continue
-
-                if col_lower in explicit_except_map.get(alias_lower, set()):
-                    continue
-
-                if col_lower in global_except_set:
-                    continue
-
-                if col_lower not in processed_target_cols:
+            if col_lower not in processed_target_cols:
+                if col_name in df.columns:
+                    selected_expressions.append(F.col(f"`{col_name}`"))
+                else:
                     if has_joins:
-                        selected_expressions.append(F.col(f"`{alias}`.`{col_name}`").alias(col_name))
+                        selected_expressions.append(F.col(f"`{self.main_alias}`.`{col_name}`").alias(col_name))
                     else:
                         selected_expressions.append(F.col(f"`{col_name}`"))
-                    
-                    processed_target_cols.add(col_lower)
+                
+                processed_target_cols.add(col_lower)
 
         if selected_expressions:
-            logger.info(f"Retained columns via Alias resolve: {[col for col in processed_target_cols]}")
-            
-            current_cols = [F.col(f"`{c}`") for c in df.columns if self._strip_prefix(c).lower() in already_selected_lower]
-            
-            final_df = df.select(*current_cols, *selected_expressions)
-            return final_df
+            return df.select(*selected_expressions)
 
         return df
 
