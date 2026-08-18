@@ -62,7 +62,6 @@ class TransformationManager:
             if not isinstance(rule, dict):
                 continue
 
-            # 1. حالة وجود column و expression
             if "column" in rule and "expression" in rule:
                 raw_col = rule["column"].strip()
                 target_col = self._strip_prefix(raw_col)
@@ -70,20 +69,12 @@ class TransformationManager:
                 
                 df = df.withColumn(target_col, F.expr(expr_str))
                 already_selected_cols.add(target_col)
-                already_selected_cols.add(raw_col)
 
-                # استخراج وتسجيل الأعمدة المصدرية المستخدمة داخل التعبير
-                source_cols = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', expr_str)
-                for sc in source_cols:
-                    already_selected_cols.add(sc)
-
-            # 2. حالة وجود run block
             elif "run" in rule:
                 run_expr = rule["run"].strip()
                 if run_expr:
                     sanitized_run_expr = self._sanitize_expression_quotes(run_expr)
                     
-                    # تنظيف الأسطر
                     raw_lines = [
                         line.strip().rstrip(",") 
                         for line in sanitized_run_expr.splitlines() 
@@ -92,7 +83,6 @@ class TransformationManager:
                     
                     if raw_lines:
                         full_expr_str = " , ".join(raw_lines)
-                        
                         expressions = [e.strip() for e in re.split(r',\s*(?![^()]*\))', full_expr_str) if e.strip()]
                         
                         for expr in expressions:
@@ -104,16 +94,8 @@ class TransformationManager:
                                 
                                 df = df.withColumn(alias_name, F.expr(expr_body))
                                 already_selected_cols.add(alias_name)
-                                
-                                source_cols = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', expr_body)
-                                for sc in source_cols:
-                                    already_selected_cols.add(sc)
                             else:
                                 df = df.selectExpr("*", expr)
-                                
-                                source_cols = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', expr)
-                                for sc in source_cols:
-                                    already_selected_cols.add(sc)
 
             elif "select_the_rest" in rule:
                 rest_cfg = rule["select_the_rest"]
