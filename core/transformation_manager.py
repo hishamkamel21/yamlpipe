@@ -62,7 +62,7 @@ class TransformationManager:
             if not isinstance(rule, dict):
                 continue
 
-            # Standard column/expression rule
+            # 1. حالة وجود column و expression
             if "column" in rule and "expression" in rule:
                 raw_col = rule["column"].strip()
                 target_col = self._strip_prefix(raw_col)
@@ -72,13 +72,18 @@ class TransformationManager:
                 already_selected_cols.add(target_col)
                 already_selected_cols.add(raw_col)
 
-            # Fix for "run" blocks: parses multi-line expressions safely without breaking on math '*'
+                # استخراج وتسجيل الأعمدة المصدرية المستخدمة داخل التعبير
+                source_cols = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', expr_str)
+                for sc in source_cols:
+                    already_selected_cols.add(sc)
+
+            # 2. حالة وجود run block
             elif "run" in rule:
                 run_expr = rule["run"].strip()
                 if run_expr:
                     sanitized_run_expr = self._sanitize_expression_quotes(run_expr)
                     
-                    # Split multi-expression run blocks cleanly by commas outside of parentheses
+                    # تنظيف الأسطر
                     raw_lines = [
                         line.strip().rstrip(",") 
                         for line in sanitized_run_expr.splitlines() 
@@ -86,19 +91,29 @@ class TransformationManager:
                     ]
                     
                     if raw_lines:
-                        # Join lines into single executable string statements
-                        full_block = " ".join(raw_lines)
-                        expressions = [e.strip() for e in re.split(r',\s*(?![^()]*\))', full_block) if e.strip()]
+                        full_expr_str = " , ".join(raw_lines)
+                        
+                        expressions = [e.strip() for e in re.split(r',\s*(?![^()]*\))', full_expr_str) if e.strip()]
                         
                         for expr in expressions:
-                            if " as " in expr.lower():
-                                parts = re.split(r'\s+as\s+', expr, flags=re.IGNORECASE)
-                                expr_body = parts[0].strip()
-                                alias_name = parts[1].strip().replace("`", "")
+                            match = re.search(r'^(.*?)\s+as\s+(.*)$', expr, re.IGNORECASE)
+                            
+                            if match:
+                                expr_body = match.group(1).strip()
+                                alias_name = match.group(2).strip().replace("`", "").replace('"', '')
+                                
                                 df = df.withColumn(alias_name, F.expr(expr_body))
                                 already_selected_cols.add(alias_name)
+                                
+                                source_cols = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', expr_body)
+                                for sc in source_cols:
+                                    already_selected_cols.add(sc)
                             else:
                                 df = df.selectExpr("*", expr)
+                                
+                                source_cols = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', expr)
+                                for sc in source_cols:
+                                    already_selected_cols.add(sc)
 
             elif "select_the_rest" in rule:
                 rest_cfg = rule["select_the_rest"]
@@ -145,7 +160,6 @@ class TransformationManager:
         selected_expressions = []
         processed_target_cols = set()
 
-        # Check if joins were actually applied in the execution pipeline
         has_joins = len(joined_dfs) > 1
 
         for alias in self.registered_aliases:
@@ -168,7 +182,6 @@ class TransformationManager:
                     continue
 
                 if col_lower not in processed_target_cols:
-                    # Fix: If no joins were executed, do NOT qualify with table alias prefix
                     if has_joins:
                         selected_expressions.append(F.col(f"`{alias}`.`{col_name}`").alias(col_name))
                     else:
