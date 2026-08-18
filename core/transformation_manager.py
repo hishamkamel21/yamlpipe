@@ -21,7 +21,7 @@ class TransformationManager:
         self.spark = df.sparkSession
         self.main_alias = parsed_config.get("alias") or "c"
         
-        # FIX 1: Apply alias directly at initialization!
+        # 1. Apply alias immediately at start
         self.df = df.alias(self.main_alias)
         
         self.registered_aliases = set(parsed_config.get("registered_aliases", [self.main_alias]))
@@ -33,8 +33,6 @@ class TransformationManager:
         
         joined_dfs: Dict[str, DataFrame] = {}
         current_df = self.df
-        
-        # FIX 2: Register main_alias with the already-aliased dataframe
         joined_dfs[self.main_alias] = current_df
 
         stages = self.parsed_config.get("stages", [])
@@ -45,13 +43,16 @@ class TransformationManager:
 
             if stage_type == "joins":
                 logger.info(f"Executing Stage {stage_idx}: JOINS...")
+                # CRITICAL: Always re-enforce the main alias right before doing joins
+                current_df = current_df.alias(self.main_alias)
                 current_df, joined_dfs = self._apply_joins(current_df, stage_data, joined_dfs)
 
             elif stage_type == "rules":
                 logger.info(f"Executing Stage {stage_idx}: RULES...")
                 current_df = self._apply_rules(current_df, stage_data, joined_dfs)
-                
-            # Keep main_alias reference updated after rules changes
+                # Re-apply main alias after transformations so PySpark logic retains 'c'
+                current_df = current_df.alias(self.main_alias)
+
             joined_dfs[self.main_alias] = current_df
 
         logger.info(f"Successfully applied transformations for '{self.table_name}'.")
@@ -117,7 +118,7 @@ class TransformationManager:
                         df = df.selectExpr(*expr_list)
 
                 elif isinstance(select_cfg, list):
-                    select_cols = [str(c).strip() for c in select_cfg]
+                    select_cols = [str(c).strip() for c in select_cols]
                     df = df.select(*[F.col(f"`{c}`") for c in select_cols])
 
                 elif isinstance(select_cfg, dict):
@@ -131,6 +132,9 @@ class TransformationManager:
                             already_selected_cols=already_selected_cols,
                             joined_dfs=joined_dfs,
                         )
+
+            # Re-alias after each rule step to preserve lineage tag
+            df = df.alias(self.main_alias)
 
         return df
 
@@ -162,14 +166,13 @@ class TransformationManager:
         selected_expressions = []
         processed_target_cols = set()
 
-        # FIX 3: Iterate through existing active columns directly to preserve newly aliased columns (cust_id)
+        # Build list directly from current active columns
         for col_name in df.columns:
             col_lower = col_name.lower()
 
             if col_lower in global_except_set:
                 continue
 
-            # Skip if explicitly excluded by prefix syntax (e.g. s.status)
             is_excepted = False
             for alias, except_cols in explicit_except_map.items():
                 if col_lower in except_cols:
@@ -204,6 +207,8 @@ class TransformationManager:
             if join_item.get("broadcast", False):
                 right_df = F.broadcast(right_df)
 
+            # Ensure main_df explicitly has main_alias right at execution time
+            main_df = main_df.alias(self.main_alias)
             main_df = main_df.join(right_df, on=F.expr(on_clause), how=how)
 
         return main_df, joined_dfs
