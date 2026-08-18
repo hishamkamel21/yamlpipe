@@ -21,9 +21,9 @@ class TransformationManager:
         self.spark = df.sparkSession
         self.main_alias = parsed_config.get("alias") or "c"
         
-        # Apply alias ONCE here during initialization
-        self.df = df.alias(self.main_alias)
+        self.df = df
         
+        self.has_main_been_aliased = False
         self.registered_aliases = set(parsed_config.get("registered_aliases", [self.main_alias]))
         raw_table = parsed_config.get("table", "unknown_table")
         self.table_name = re.sub(r"[^a-zA-Z0-9_]", "_", Helper.parse_table_name(raw_table))
@@ -43,6 +43,11 @@ class TransformationManager:
 
             if stage_type == "joins":
                 logger.info(f"Executing Stage {stage_idx}: JOINS...")
+                
+                if not self.has_main_been_aliased:
+                    current_df = current_df.alias(self.main_alias)
+                    self.has_main_been_aliased = True
+                
                 current_df, joined_dfs = self._apply_joins(current_df, stage_data, joined_dfs)
 
             elif stage_type == "rules":
