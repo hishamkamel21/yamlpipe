@@ -21,7 +21,7 @@ class TransformationManager:
         self.spark = df.sparkSession
         self.main_alias = parsed_config.get("alias") or "c"
         
-        # 1. Apply alias immediately at start
+        # Apply alias ONCE here during initialization
         self.df = df.alias(self.main_alias)
         
         self.registered_aliases = set(parsed_config.get("registered_aliases", [self.main_alias]))
@@ -112,9 +112,6 @@ class TransformationManager:
                     select_cols = [str(c).strip() for c in select_cfg]
                     df = df.select(*[F.col(f"`{c}`") for c in select_cols])
 
-            # Re-alias after each rule step to preserve lineage tag
-            df = df.alias(self.main_alias)
-
         return df
 
     def _apply_joins(
@@ -133,8 +130,6 @@ class TransformationManager:
             if join_item.get("broadcast", False):
                 right_df = F.broadcast(right_df)
 
-            # Ensure main_df explicitly has main_alias right at execution time
-            main_df = main_df.alias(self.main_alias)
             main_df = main_df.join(right_df, on=F.expr(on_clause), how=how)
 
         return main_df, joined_dfs
