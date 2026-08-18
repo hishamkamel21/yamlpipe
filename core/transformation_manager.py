@@ -1,5 +1,3 @@
-
-
 import logging
 import re
 from typing import Dict, Any, List, Set, Tuple
@@ -41,10 +39,9 @@ class TransformationManager:
             stage_data = stage.get("data", [])
 
             if stage_type == "joins":
-                logger.info(f"Executing Stage {stage_idx}: JOINS...")                
+                logger.info(f"Executing Stage {stage_idx}: JOINS...")
                 current_df = current_df.alias(self.main_alias)
                 joined_dfs[self.main_alias] = current_df
-                
                 current_df, joined_dfs = self._apply_joins(current_df, stage_data, joined_dfs)
 
             elif stage_type == "rules":
@@ -53,34 +50,6 @@ class TransformationManager:
 
         logger.info(f"Successfully applied transformations for '{self.table_name}'.")
         return current_df
-    
-    def _apply_joins(
-        self, df: DataFrame, joins_meta: List[Dict[str, Any]], joined_dfs: Dict[str, DataFrame]
-    ) -> Tuple[DataFrame, Dict[str, DataFrame]]:
-        for j in joins_meta:
-            if not isinstance(j, dict):
-                continue
-
-            target_table = j.get("table")
-            tbl_alias = j.get("alias") or target_table
-            how = j.get("how", "left")
-
-            right_df = self.spark.table(target_table)
-            if tbl_alias:
-                right_df = right_df.alias(tbl_alias)
-
-            joined_dfs[tbl_alias] = right_df
-
-            if j.get("broadcast"):
-                right_df = F.broadcast(right_df)
-
-            on_clause = j.get("on_clause")
-            if on_clause:
-                df = df.join(right_df, on=F.expr(on_clause), how=how)
-            else:
-                df = df.join(right_df, how=how)
-
-        return df, joined_dfs
 
     def _apply_rules(
         self, df: DataFrame, rules_meta: List[Dict[str, Any]], joined_dfs: Dict[str, DataFrame]
@@ -93,7 +62,6 @@ class TransformationManager:
             if not isinstance(rule, dict):
                 continue
 
-            # 1. Column + Expression Processing
             if "column" in rule and "expression" in rule:
                 raw_col = rule["column"].strip()
                 target_col = self._strip_prefix(raw_col)
@@ -104,20 +72,19 @@ class TransformationManager:
                 already_selected_cols.add(target_col)
                 already_selected_cols.add(raw_col)
 
-            # 2. General RUN Execution Logic (Struct Unpacking OR Arbitrary SQL Expr)
             elif "run" in rule:
                 run_expr = rule["run"].strip()
                 if run_expr:
                     sanitized_run_expr = self._sanitize_expression_quotes(run_expr)
-                    
                     cols_before = set(df.columns)
                     
-                    df = df.selectExpr("*", sanitized_run_expr)
+                    raw_lines = [line.strip().rstrip(",") for line in sanitized_run_expr.splitlines() if line.strip()]
                     
-                    new_cols = set(df.columns) - cols_before
-                    already_selected_cols.update(new_cols)
+                    if raw_lines:
+                        df = df.selectExpr("*", *raw_lines)
+                        new_cols = set(df.columns) - cols_before
+                        already_selected_cols.update(new_cols)
 
-            # 3. Select The Rest Processing
             elif "select_the_rest" in rule:
                 rest_cfg = rule["select_the_rest"]
                 select_rest_enabled = rest_cfg.get("enable", False)
@@ -133,7 +100,6 @@ class TransformationManager:
 
         return df
 
-    
     def resolve_select_the_rest(
         self,
         df: DataFrame,
@@ -141,50 +107,62 @@ class TransformationManager:
         already_selected_cols: Set[str],
         joined_dfs: Dict[str, DataFrame],
     ) -> DataFrame:
-        excluded_qualified: Set[str] = set()
-        excluded_simple: Set[str] = set()
+        logger.info("Resolving 'select_the_rest' columns...")
+        
+        # Clean except items and track prefix dependencies
+        cleaned_except = {self._strip_prefix(col).lower() for col in except_list if isinstance(col, str)}
+        raw_except_set = {col.strip().lower() for col in except_list if isinstance(col, str)}
+        already_selected_lower = {col.lower() for col in already_selected_cols}
 
-        for item in except_list:
-            item_clean = item.replace("`", "").strip()
-            if "." in item_clean:
-                excluded_qualified.add(item_clean)
-            else:
-                excluded_simple.add(item_clean)
+        cols_to_keep = []
 
-        for qual in list(excluded_qualified):
-            alias_part, col_part = qual.split(".", 1)
-            if alias_part in joined_dfs:
-                source_df = joined_dfs[alias_part]
-                if col_part in source_df.columns:
-                    try:
-                        df = df.drop(source_df[col_part])
-                    except Exception as e:
-                        logger.warning(f"Failed to drop qualified column {qual}: {e}")
+        for col in df.columns:
+            col_lower = col.lower()
+            clean_col_lower = self._strip_prefix(col).lower()
 
-        cols_to_select = []
-        seen_output_names = set()
-
-        for col_name in df.columns:
-            plain_name = self._strip_prefix(col_name)
-
-            if col_name in excluded_simple or plain_name in excluded_simple:
+            # Skip if explicitly excluded in except list or already selected by previous rules
+            if col_lower in raw_except_set or clean_col_lower in cleaned_except:
+                continue
+            if col_lower in already_selected_lower or clean_col_lower in already_selected_lower:
                 continue
 
-            if col_name in already_selected_cols or plain_name in already_selected_cols:
-                if plain_name not in seen_output_names:
-                    cols_to_select.append(col_name)
-                    seen_output_names.add(plain_name)
-                continue
+            cols_to_keep.append(col)
 
-            if plain_name not in seen_output_names:
-                cols_to_select.append(col_name)
-                seen_output_names.add(plain_name)
+        if cols_to_keep:
+            logger.info(f"Retaining remaining columns: {cols_to_keep}")
+            # Ensure unique column selection maintaining order
+            select_exprs = [F.col(f"`{col}`") for col in df.columns if col in set(cols_to_keep) or col in already_selected_cols]
+            df = df.select(*select_exprs)
 
-        return df.select(*cols_to_select)
+        return df
 
-    def _strip_prefix(self, col_ref: str) -> str:
-        clean = col_ref.replace("`", "").strip()
-        return clean.split(".")[-1]
+    def _apply_joins(
+        self, main_df: DataFrame, joins_config: List[Dict[str, Any]], joined_dfs: Dict[str, DataFrame]
+    ) -> Tuple[DataFrame, Dict[str, DataFrame]]:
+        for join_item in joins_config:
+            table = join_item.get("table")
+            alias = join_item.get("alias")
+            how = join_item.get("how", "inner")
+            on_clause = join_item.get("on_clause")
 
-    def _sanitize_expression_quotes(self, expr: str) -> str:
-        return re.sub(r'\"([^\"]*)\"', r"'\1'", expr)
+            logger.info(f"Joining table '{table}' as '{alias}' using {how} join...")
+            right_df = self.spark.table(table).alias(alias)
+            joined_dfs[alias] = right_df
+
+            if join_item.get("broadcast", False):
+                right_df = F.broadcast(right_df)
+
+            main_df = main_df.join(right_df, on=F.expr(on_clause), how=how)
+
+        return main_df, joined_dfs
+
+    def _strip_prefix(self, col_name: str) -> str:
+        if "." in col_name:
+            prefix, rest = col_name.split(".", 1)
+            if prefix in self.registered_aliases:
+                return rest
+        return col_name
+
+    def _sanitize_expression_quotes(self, expr_str: str) -> str:
+        # Replaces double quotes with single quotes inside SQL string literals
+        return re.sub(r'(?<!\\)"([^"\\]*(?:\\.[^"\\]*)*)"', r"'\1'", expr_str)
