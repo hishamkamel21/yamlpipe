@@ -1,5 +1,8 @@
+import logging
 from typing import Dict, Any, List, Set, Optional
 from yamlpipe.registry.transformation_registry import TransformationRegistry
+
+logger = logging.getLogger("TransformationParser")
 
 
 class TransformationParser:
@@ -20,27 +23,60 @@ class TransformationParser:
         raw_table = clean_config.get("table", "unknown_table")
         main_alias = clean_config.get("alias", "c")
 
-        raw_joins = clean_config.get("joins", [])
-        parsed_joins: List[Dict[str, Any]] = []
+        parsed_stages: List[Dict[str, Any]] = []
         registered_aliases: List[str] = [main_alias]
 
-        if isinstance(raw_joins, list):
-            for join_item in raw_joins:
-                if isinstance(join_item, dict):
-                    parsed_join = cls._parse_join(cls._sanitize_dict(join_item))
-                    parsed_joins.append(parsed_join)
-                    if parsed_join.get("alias"):
-                        registered_aliases.append(parsed_join["alias"])
+        if "stages" in clean_config and isinstance(clean_config["stages"], list):
+            for stage in clean_config["stages"]:
+                if not isinstance(stage, dict):
+                    continue
 
-        raw_rules = clean_config.get("rules", [])
-        parsed_rules: List[Dict[str, Any]] = []
+                if "joins" in stage:
+                    raw_joins = stage.get("joins", [])
+                    parsed_joins = []
+                    if isinstance(raw_joins, list):
+                        for join_item in raw_joins:
+                            if isinstance(join_item, dict):
+                                parsed_join = cls._parse_join(cls._sanitize_dict(join_item))
+                                parsed_joins.append(parsed_join)
+                                if parsed_join.get("alias"):
+                                    registered_aliases.append(parsed_join["alias"])
+                    parsed_stages.append({"type": "joins", "data": parsed_joins})
 
-        if isinstance(raw_rules, list):
-            for rule_item in raw_rules:
-                if isinstance(rule_item, dict):
-                    sanitized_rule = cls._sanitize_dict(rule_item)
-                    expanded = TransformationRegistry.process_rule(sanitized_rule)
-                    parsed_rules.extend(expanded)
+                elif "rules" in stage:
+                    raw_rules = stage.get("rules", [])
+                    parsed_rules = []
+                    if isinstance(raw_rules, list):
+                        for rule_item in raw_rules:
+                            if isinstance(rule_item, dict):
+                                sanitized_rule = cls._sanitize_dict(rule_item)
+                                expanded = TransformationRegistry.process_rule(sanitized_rule)
+                                parsed_rules.extend(expanded)
+                    parsed_stages.append({"type": "rules", "data": parsed_rules})
+
+        else:
+            raw_joins = clean_config.get("joins", [])
+            parsed_joins = []
+            if isinstance(raw_joins, list):
+                for join_item in raw_joins:
+                    if isinstance(join_item, dict):
+                        parsed_join = cls._parse_join(cls._sanitize_dict(join_item))
+                        parsed_joins.append(parsed_join)
+                        if parsed_join.get("alias"):
+                            registered_aliases.append(parsed_join["alias"])
+            if parsed_joins:
+                parsed_stages.append({"type": "joins", "data": parsed_joins})
+
+            raw_rules = clean_config.get("rules", [])
+            parsed_rules = []
+            if isinstance(raw_rules, list):
+                for rule_item in raw_rules:
+                    if isinstance(rule_item, dict):
+                        sanitized_rule = cls._sanitize_dict(rule_item)
+                        expanded = TransformationRegistry.process_rule(sanitized_rule)
+                        parsed_rules.extend(expanded)
+            if parsed_rules:
+                parsed_stages.append({"type": "rules", "data": parsed_rules})
 
         contained_functions = sorted(
             list(cls._extract_function_names(clean_config))
@@ -50,8 +86,7 @@ class TransformationParser:
             "table": raw_table,
             "alias": main_alias,
             "registered_aliases": list(set(registered_aliases)),
-            "joins": parsed_joins,
-            "rules": parsed_rules,
+            "stages": parsed_stages,
             "ContainVarsFrom": clean_config.get("ContainVarsFrom", []),
             "ContainFunctionsFrom": contained_functions,
         }
@@ -66,7 +101,7 @@ class TransformationParser:
         found_funcs: Set[str] = set()
         if isinstance(data, dict):
             for k, v in data.items():
-                if k == "call_function" and isinstance(v, str):
+                if k in ("call_function", "call_func") and isinstance(v, str):
                     found_funcs.add(v.strip())
                 else:
                     found_funcs.update(cls._extract_function_names(v))

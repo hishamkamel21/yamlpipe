@@ -29,17 +29,22 @@ class TransformationManager:
         logger.info(f"Applying DataFrame transformations for table '{self.table_name}'...")
         
         joined_dfs: Dict[str, DataFrame] = {}
-        
         current_df = self.df.alias(self.main_alias)
         joined_dfs[self.main_alias] = current_df
 
-        joins_meta = self.parsed_config.get("joins", [])
-        if joins_meta:
-            current_df, joined_dfs = self._apply_joins(current_df, joins_meta, joined_dfs)
+        stages = self.parsed_config.get("stages", [])
 
-        rules_meta = self.parsed_config.get("rules", [])
-        if rules_meta:
-            current_df = self._apply_rules(current_df, rules_meta, joined_dfs)
+        for stage_idx, stage in enumerate(stages, 1):
+            stage_type = stage.get("type")
+            stage_data = stage.get("data", [])
+
+            if stage_type == "joins":
+                logger.info(f"Executing Stage {stage_idx}: JOINS...")
+                current_df, joined_dfs = self._apply_joins(current_df, stage_data, joined_dfs)
+
+            elif stage_type == "rules":
+                logger.info(f"Executing Stage {stage_idx}: RULES...")
+                current_df = self._apply_rules(current_df, stage_data, joined_dfs)
 
         logger.info(f"Successfully applied transformations for '{self.table_name}'.")
         return current_df
@@ -83,6 +88,7 @@ class TransformationManager:
             if not isinstance(rule, dict):
                 continue
 
+            # 1. Column + Expression Processing
             if "column" in rule and "expression" in rule:
                 raw_col = rule["column"].strip()
                 target_col = self._strip_prefix(raw_col)
@@ -93,8 +99,11 @@ class TransformationManager:
                 already_selected_cols.add(target_col)
                 already_selected_cols.add(raw_col)
 
+            # 2. General RUN Execution Logic (Struct Unpacking OR Arbitrary SQL Expr)
             elif "run" in rule:
                 run_expr = rule["run"].strip()
+                
+                # Case A: Struct Unpacking (e.g., run: "location.*")
                 if run_expr.endswith(".*"):
                     col_prefix = run_expr[:-2]
                     matching_cols = [c for c in df.columns if c == col_prefix or c.endswith(f".{col_prefix}")]
@@ -107,6 +116,12 @@ class TransformationManager:
                                 df = df.withColumn(out_col, F.col(f"`{target_col}`.{field}"))
                                 already_selected_cols.add(out_col)
 
+                # Case B: Arbitrary SQL Expression (e.g., run: "split(email, '@')[0] as username")
+                else:
+                    sanitized_run_expr = self._sanitize_expression_quotes(run_expr)
+                    df = df.selectExpr("*", sanitized_run_expr)
+
+            # 3. Select The Rest Processing
             elif "select_the_rest" in rule:
                 rest_cfg = rule["select_the_rest"]
                 select_rest_enabled = rest_cfg.get("enable", False)
@@ -122,6 +137,7 @@ class TransformationManager:
 
         return df
 
+    
     def resolve_select_the_rest(
         self,
         df: DataFrame,
@@ -132,7 +148,6 @@ class TransformationManager:
         excluded_qualified: Set[str] = set()
         excluded_simple: Set[str] = set()
 
-        # 1. تفكيك الاستثناءات
         for item in except_list:
             item_clean = item.replace("`", "").strip()
             if "." in item_clean:
@@ -140,7 +155,6 @@ class TransformationManager:
             else:
                 excluded_simple.add(item_clean)
 
-        # 2. الإسقاط الصريح بـ Reference لـ c.status أو s.status
         for qual in list(excluded_qualified):
             alias_part, col_part = qual.split(".", 1)
             if alias_part in joined_dfs:
@@ -151,25 +165,21 @@ class TransformationManager:
                     except Exception as e:
                         logger.warning(f"Failed to drop qualified column {qual}: {e}")
 
-        # 3. بناء الـ Select النهائي وتفادي التكرار
         cols_to_select = []
         seen_output_names = set()
 
         for col_name in df.columns:
             plain_name = self._strip_prefix(col_name)
 
-            # تجاهل المستثنيات البسيطة
             if col_name in excluded_simple or plain_name in excluded_simple:
                 continue
 
-            # الأعمدة المعرفة في الـ Rules
             if col_name in already_selected_cols or plain_name in already_selected_cols:
                 if plain_name not in seen_output_names:
                     cols_to_select.append(col_name)
                     seen_output_names.add(plain_name)
                 continue
 
-            # الأعمدة المتبقية
             if plain_name not in seen_output_names:
                 cols_to_select.append(col_name)
                 seen_output_names.add(plain_name)
