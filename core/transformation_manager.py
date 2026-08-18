@@ -117,15 +117,16 @@ class TransformationManager:
                         schema_field = next((f for f in df.schema.fields if f.name == target_col), None)
                         if schema_field and hasattr(schema_field.dataType, "names"):
                             for field in schema_field.dataType.names:
-                                out_col = f"{self._strip_prefix(col_prefix)}_{field}"
+                                # تغيير هنا: استخدام اسم الحقل الداخلي فقط بدون PREFIX
+                                out_col = field
                                 df = df.withColumn(out_col, F.col(f"`{target_col}`.{field}"))
                                 already_selected_cols.add(out_col)
 
-                # Case B: Arbitrary SQL Expression (e.g., run: "split(email, '@')[0] as username")
+                # Case B: Arbitrary SQL Expression
                 else:
                     sanitized_run_expr = self._sanitize_expression_quotes(run_expr)
                     df = df.selectExpr("*", sanitized_run_expr)
-
+                    
             # 3. Select The Rest Processing
             elif "select_the_rest" in rule:
                 rest_cfg = rule["select_the_rest"]
