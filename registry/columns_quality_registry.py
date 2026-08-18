@@ -169,16 +169,20 @@ class ColumnQualityRegistry:
 
     @staticmethod
     def compare_columns_check(check: dict, column: str):
-        error_suffix = "COMPARE_ERROR"
         severity, when_cond, col_expr = ColumnQualityRegistry._extract_base_params(check, column)
-        if "target_column" not in check:
-            raise KeyError(f"compare_columns check on column '{column}' requires 'target_column'.")
 
-        target_column = str(check["target_column"]).strip()
+        target_col_val = check.get("compare_to") or check.get("target_column")
+        if not target_col_val:
+            raise KeyError(f"compare_columns check on column '{column}' requires 'compare_to'.")
+
+        target_column = str(target_col_val).strip()
         operator = check.get("operator", ">=").strip()
 
         if not AllowedOperator.is_valid(operator):
             raise ValueError(f"Invalid operator '{operator}' in compare_columns check.")
+
+        # suffix يعكس العامودين المتقارنين
+        error_suffix = f"COMPARE_ERROR"
 
         sql = f"""
         CASE
@@ -263,30 +267,43 @@ class ColumnQualityRegistry:
 
     @staticmethod
     def custom_check(check: dict, column: str):
-        if "the_check" not in check:
-            raise KeyError(f"Custom check on column '{column}' requires 'the_check' field.")
-
-        check_name = check["the_check"]
-        error_suffix = f"{check_name.upper()}_ERROR"
-        params = check.get("params", [])
         severity, when_cond, _ = ColumnQualityRegistry._extract_base_params(check, column)
+        
+        if "sql_expr" in check:
+            sql_condition = Helper.clean_multiline_sql(check["sql_expr"])
+            
+            check_alias = check.get("name") or check.get("check_name") or "SQL_EXPR"
+            error_suffix = f"{check_alias.upper()}_ERROR"
 
-        if isinstance(params, dict):
-            check_expr = ModuleLoader.custom_checks_loader(check_name, **params)
-        elif isinstance(params, list):
-            check_expr = ModuleLoader.custom_checks_loader(check_name, *params)
+            sql = f"""
+            CASE
+                WHEN ({when_cond}) AND NOT ({sql_condition})
+                THEN array('{column}_{error_suffix}')
+                ELSE {ColumnQualityRegistry.EMPTY_ARRAY_SQL}
+            END
+            """
+            return sql, severity, error_suffix
+
+        elif "the_check" in check:
+            check_name = check["the_check"]
+            error_suffix = f"{check_name.upper()}_ERROR"
+            params = check.get("params", {})
+
+            if isinstance(params, dict):
+                check_expr = ModuleLoader.custom_checks_loader(check_name, **params)
+            elif isinstance(params, list):
+                check_expr = ModuleLoader.custom_checks_loader(check_name, *params)
+            else:
+                check_expr = ModuleLoader.custom_checks_loader(check_name, params)
+
+            sql = f"""
+            CASE
+                WHEN ({when_cond}) AND ({check_expr})
+                THEN array('{column}_{error_suffix}')
+                ELSE {ColumnQualityRegistry.EMPTY_ARRAY_SQL}
+            END
+            """
+            return sql, severity, error_suffix
+
         else:
-            check_expr = ModuleLoader.custom_checks_loader(check_name, params)
-
-        sql = f"""
-        CASE
-            WHEN ({when_cond}) AND ({check_expr})
-            THEN array('{column}_{error_suffix}')
-            ELSE {ColumnQualityRegistry.EMPTY_ARRAY_SQL}
-        END
-        """
-        return sql, severity, error_suffix
-
-
-
-
+            raise KeyError(f"Custom check on '{column}' requires either 'sql_expr' or 'the_check' field.")

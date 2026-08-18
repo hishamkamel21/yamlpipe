@@ -84,19 +84,35 @@ class ColumnQualityParser:
         column_name = entry.get("column")
         check_type = entry.get("check_type") or entry.get("type")
 
-        # 1. Column-First Format (e.g., column: nights, checks: [...])
+        # 1. Column-First Format (e.g., column: check_in_date)
         if column_name:
             if VariablesManager.is_var(column_name):
                 raise ValueError(f"Column-First format cannot use variables for 'column': '{column_name}'")
 
             checks = entry.get("checks", [])
-            for check in checks:
-                if not isinstance(check, dict):
-                    continue
-                resolved_check = TemplateResolver.resolve_placeholders(check, column_name)
-                yield resolved_check, column_name
+            
+            # إذا كانت الفحوصات مكتوبة كـ List تحت العامود
+            if isinstance(checks, list) and checks:
+                for check in checks:
+                    if not isinstance(check, dict):
+                        continue
+                    resolved_check = TemplateResolver.resolve_placeholders(check, column_name)
+                    yield resolved_check, column_name
 
-        # 2. Check-First Format (e.g., check_type: custom, check_type: not_null)
+            # إذا كانت check_type على نفس المستوى مع column و compare_to قائمة (الشكل الجديد)
+            elif check_type:
+                compare_to_list = entry.get("compare_to")
+                if isinstance(compare_to_list, list):
+                    for target_col in compare_to_list:
+                        single_check = entry.copy()
+                        single_check["compare_to"] = target_col
+                        resolved_check = TemplateResolver.resolve_placeholders(single_check, column_name)
+                        yield resolved_check, column_name
+                else:
+                    resolved_check = TemplateResolver.resolve_placeholders(entry, column_name)
+                    yield resolved_check, column_name
+
+        # 2. Check-First Format
         elif check_type:
             if VariablesManager.is_var(check_type):
                 raise ValueError(f"Check-First format cannot use variables for 'check_type': '{check_type}'")
@@ -104,7 +120,6 @@ class ColumnQualityParser:
             check_type_str = str(check_type).lower().strip()
             has_iteration_list = bool(entry.get("columns") or entry.get("for_each"))
 
-            # Validation: Non-multi-column check types MUST specify 'columns' or 'for_each'
             if not has_iteration_list and check_type_str not in cls.ALLOWED_MULTI_COLUMN_CHECK_TYPES:
                 raise ValueError(
                     f"Check-First entry with check_type '{check_type}' requires a 'columns' or 'for_each' list."
@@ -112,7 +127,6 @@ class ColumnQualityParser:
 
             expanded_checks = TemplateResolver.resolve_and_expand(entry)
             for resolved_payload, col in expanded_checks:
-                # If col is empty (table/multi-column check without iteration), derive fallback alias from the_check or check_type
                 fallback_col = col or (
                     resolved_payload.get("name")
                     or resolved_payload.get("the_check")
