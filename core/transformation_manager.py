@@ -155,10 +155,9 @@ class TransformationManager:
 
         selected_expressions = []
         processed_target_cols = set()
+        current_df_cols = set(df.columns)
 
-        # 1. Collect all valid column names from joined source DataFrames sequentially
-        # prioritizing columns created/modified in current_df first
-        current_df_cols = df.columns
+        # Iterate over source tables to preserve order and qualify columns cleanly
         has_joins = len(joined_dfs) > 1
 
         for alias in self.registered_aliases:
@@ -171,23 +170,22 @@ class TransformationManager:
             for col_name in source_df.columns:
                 col_lower = col_name.lower()
 
-                # Check if excluded globally or specifically for this alias
                 if col_lower in global_except_set:
                     continue
                 if col_lower in explicit_except_map.get(alias_lower, set()):
                     continue
 
                 if col_lower not in processed_target_cols:
-                    # If there's a join, resolve ambiguity by using fully qualified alias.col
-                    if has_joins and col_name in source_df.columns:
-                        selected_expressions.append(df[f"`{alias}`.`{col_name}`"].alias(col_name))
+                    if has_joins:
+                        # Use F.col with explicit string alias path to prevent dataframe lineage mismatch
+                        selected_expressions.append(F.col(f"`{alias}`.`{col_name}`").alias(col_name))
                     else:
                         selected_expressions.append(F.col(f"`{col_name}`"))
 
                     processed_target_cols.add(col_lower)
 
-        # 2. Also capture any dynamically added columns (like status_id) that don't exist in source_dfs
-        for col_name in current_df_cols:
+        # Include remaining dynamically calculated columns (e.g., status_id, cust_id)
+        for col_name in df.columns:
             col_lower = col_name.lower()
 
             if col_lower in global_except_set:
@@ -212,6 +210,8 @@ class TransformationManager:
             on_clause = join_item.get("on_clause")
 
             logger.info(f"Joining table '{table}' as '{alias}' using {how} join...")
+            
+            # Fetch table and immediately store it in joined_dfs
             right_df = self.spark.table(table).alias(alias)
             joined_dfs[alias] = right_df
 
