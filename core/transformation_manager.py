@@ -66,7 +66,7 @@ class TransformationManager:
                 expr_str = self._sanitize_expression_quotes(rule["expression"].strip())
                 
                 df = df.withColumn(target_col, F.expr(expr_str))
-                already_selected_cols.add(target_col)
+                already_selected_cols.add(target_col.lower())
 
             elif "run" in rule:
                 run_expr = rule["run"].strip()
@@ -91,7 +91,7 @@ class TransformationManager:
                                 alias_name = match.group(2).strip().replace("`", "").replace('"', '')
                                 
                                 df = df.withColumn(alias_name, F.expr(expr_body))
-                                already_selected_cols.add(alias_name)
+                                already_selected_cols.add(alias_name.lower())
                             else:
                                 df = df.selectExpr("*", expr)
 
@@ -153,39 +153,34 @@ class TransformationManager:
             else:
                 global_except_set.add(col_str)
 
-        all_candidate_cols: List[str] = list(df.columns)
-
-        has_joins = len(joined_dfs) > 1
-        for alias in self.registered_aliases:
-            source_df = joined_dfs.get(alias)
-            if source_df is not None:
-                for col_name in source_df.columns:
-                    if col_name not in all_candidate_cols:
-                        all_candidate_cols.append(col_name)
-
         selected_expressions = []
         processed_target_cols = set()
+        has_joins = len(joined_dfs) > 1
 
-        for col_name in all_candidate_cols:
-            col_stripped = self._strip_prefix(col_name)
-            col_lower = col_stripped.lower()
+        # Qualify columns by explicitly routing through source table aliases
+        for alias in self.registered_aliases:
+            alias_lower = alias.lower()
+            source_df = joined_dfs.get(alias)
 
-            if col_lower in global_except_set:
+            if source_df is None:
                 continue
 
-            if col_lower in explicit_except_map.get(self.main_alias.lower(), set()):
-                continue
+            for col_name in source_df.columns:
+                col_lower = col_name.lower()
 
-            if col_lower not in processed_target_cols:
-                if col_name in df.columns:
-                    selected_expressions.append(F.col(f"`{col_name}`"))
-                else:
+                if col_lower in global_except_set:
+                    continue
+
+                if col_lower in explicit_except_map.get(alias_lower, set()):
+                    continue
+
+                if col_lower not in processed_target_cols:
                     if has_joins:
-                        selected_expressions.append(F.col(f"`{self.main_alias}`.`{col_name}`").alias(col_name))
+                        selected_expressions.append(F.col(f"`{alias}`.`{col_name}`").alias(col_name))
                     else:
                         selected_expressions.append(F.col(f"`{col_name}`"))
-                
-                processed_target_cols.add(col_lower)
+                    
+                    processed_target_cols.add(col_lower)
 
         if selected_expressions:
             return df.select(*selected_expressions)
