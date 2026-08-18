@@ -155,9 +155,22 @@ class TransformationManager:
 
         selected_expressions = []
         processed_target_cols = set()
-        has_joins = len(joined_dfs) > 1
+        
+        current_df_cols = set(df.columns)
 
-        # Qualify columns by explicitly routing through source table aliases
+        # 1. First preference: retain all currently transformed/existing columns in df
+        for col_name in df.columns:
+            col_lower = col_name.lower()
+
+            if col_lower in global_except_set:
+                continue
+
+            if col_lower not in processed_target_cols:
+                selected_expressions.append(F.col(f"`{col_name}`"))
+                processed_target_cols.add(col_lower)
+
+        # 2. Second preference: resolve any remaining source table columns if not already in df or excepted
+        has_joins = len(joined_dfs) > 1
         for alias in self.registered_aliases:
             alias_lower = alias.lower()
             source_df = joined_dfs.get(alias)
@@ -174,7 +187,7 @@ class TransformationManager:
                 if col_lower in explicit_except_map.get(alias_lower, set()):
                     continue
 
-                if col_lower not in processed_target_cols:
+                if col_lower not in processed_target_cols and col_name not in current_df_cols:
                     if has_joins:
                         selected_expressions.append(F.col(f"`{alias}`.`{col_name}`").alias(col_name))
                     else:
