@@ -49,8 +49,8 @@ class TransformationManager:
 
             elif stage_type == "rules":
                 logger.info(f"Executing Stage {stage_idx}: RULES...")
-                current_df = self._apply_rules(current_df, stage_data, joined_dfs)
-                # Re-apply main alias after transformations so PySpark logic retains 'c'
+                current_df = self._apply_rules(current_df, stage_data)
+                # Re-apply main alias after transformations so PySpark logic retains main alias tag
                 current_df = current_df.alias(self.main_alias)
 
             joined_dfs[self.main_alias] = current_df
@@ -58,23 +58,20 @@ class TransformationManager:
         logger.info(f"Successfully applied transformations for '{self.table_name}'.")
         return current_df
 
-    def _apply_rules(
-        self, df: DataFrame, rules_meta: List[Dict[str, Any]], joined_dfs: Dict[str, DataFrame]
-    ) -> DataFrame:
-        already_selected_cols: Set[str] = set()
-
+    def _apply_rules(self, df: DataFrame, rules_meta: List[Dict[str, Any]]) -> DataFrame:
         for rule in rules_meta:
             if not isinstance(rule, dict):
                 continue
 
+            # Handle direct column expression rule
             if "column" in rule and "expression" in rule:
                 raw_col = rule["column"].strip()
                 target_col = self._strip_prefix(raw_col)
                 expr_str = self._sanitize_expression_quotes(rule["expression"].strip())
                 
                 df = df.withColumn(target_col, F.expr(expr_str))
-                already_selected_cols.add(target_col.lower())
 
+            # Handle block 'run' rule
             elif "run" in rule:
                 run_expr = rule["run"].strip()
                 if run_expr:
@@ -92,16 +89,14 @@ class TransformationManager:
                         
                         for expr in expressions:
                             match = re.search(r'^(.*?)\s+as\s+(.*)$', expr, re.IGNORECASE)
-                            
                             if match:
                                 expr_body = match.group(1).strip()
                                 alias_name = match.group(2).strip().replace("`", "").replace('"', '')
-                                
                                 df = df.withColumn(alias_name, F.expr(expr_body))
-                                already_selected_cols.add(alias_name.lower())
                             else:
                                 df = df.selectExpr("*", expr)
 
+            # Handle explicit 'select' rule
             elif "select" in rule:
                 select_cfg = rule["select"]
                 
@@ -118,76 +113,11 @@ class TransformationManager:
                         df = df.selectExpr(*expr_list)
 
                 elif isinstance(select_cfg, list):
-                    select_cols = [str(c).strip() for c in select_cols]
+                    select_cols = [str(c).strip() for c in select_cfg]
                     df = df.select(*[F.col(f"`{c}`") for c in select_cols])
-
-                elif isinstance(select_cfg, dict):
-                    handled_enabled = select_cfg.get("handled_cols", False)
-                    raw_except_list = select_cfg.get("except", [])
-
-                    if handled_enabled:
-                        df = self.resolve_select_with_except(
-                            df=df,
-                            except_list=raw_except_list,
-                            already_selected_cols=already_selected_cols,
-                            joined_dfs=joined_dfs,
-                        )
 
             # Re-alias after each rule step to preserve lineage tag
             df = df.alias(self.main_alias)
-
-        return df
-
-    def resolve_select_with_except(
-        self,
-        df: DataFrame,
-        except_list: List[str],
-        already_selected_cols: Set[str],
-        joined_dfs: Dict[str, DataFrame],
-    ) -> DataFrame:
-        logger.info("Resolving 'select' with handled_cols and except list...")
-
-        explicit_except_map: Dict[str, Set[str]] = {alias.lower(): set() for alias in self.registered_aliases}
-        global_except_set: Set[str] = set()
-
-        for col in except_list:
-            if not isinstance(col, str):
-                continue
-            col_str = col.strip().lower()
-            if "." in col_str:
-                prefix, col_name = col_str.split(".", 1)
-                if prefix in explicit_except_map:
-                    explicit_except_map[prefix].add(col_name)
-                else:
-                    global_except_set.add(col_name)
-            else:
-                global_except_set.add(col_str)
-
-        selected_expressions = []
-        processed_target_cols = set()
-
-        # Build list directly from current active columns
-        for col_name in df.columns:
-            col_lower = col_name.lower()
-
-            if col_lower in global_except_set:
-                continue
-
-            is_excepted = False
-            for alias, except_cols in explicit_except_map.items():
-                if col_lower in except_cols:
-                    is_excepted = True
-                    break
-
-            if is_excepted:
-                continue
-
-            if col_lower not in processed_target_cols:
-                selected_expressions.append(F.col(f"`{col_name}`"))
-                processed_target_cols.add(col_lower)
-
-        if selected_expressions:
-            return df.select(*selected_expressions)
 
         return df
 
