@@ -155,22 +155,12 @@ class TransformationManager:
 
         selected_expressions = []
         processed_target_cols = set()
-        
-        current_df_cols = set(df.columns)
 
-        # 1. First preference: retain all currently transformed/existing columns in df
-        for col_name in df.columns:
-            col_lower = col_name.lower()
-
-            if col_lower in global_except_set:
-                continue
-
-            if col_lower not in processed_target_cols:
-                selected_expressions.append(F.col(f"`{col_name}`"))
-                processed_target_cols.add(col_lower)
-
-        # 2. Second preference: resolve any remaining source table columns if not already in df or excepted
+        # 1. Collect all valid column names from joined source DataFrames sequentially
+        # prioritizing columns created/modified in current_df first
+        current_df_cols = df.columns
         has_joins = len(joined_dfs) > 1
+
         for alias in self.registered_aliases:
             alias_lower = alias.lower()
             source_df = joined_dfs.get(alias)
@@ -181,19 +171,31 @@ class TransformationManager:
             for col_name in source_df.columns:
                 col_lower = col_name.lower()
 
+                # Check if excluded globally or specifically for this alias
                 if col_lower in global_except_set:
                     continue
-
                 if col_lower in explicit_except_map.get(alias_lower, set()):
                     continue
 
-                if col_lower not in processed_target_cols and col_name not in current_df_cols:
-                    if has_joins:
-                        selected_expressions.append(F.col(f"`{alias}`.`{col_name}`").alias(col_name))
+                if col_lower not in processed_target_cols:
+                    # If there's a join, resolve ambiguity by using fully qualified alias.col
+                    if has_joins and col_name in source_df.columns:
+                        selected_expressions.append(df[f"`{alias}`.`{col_name}`"].alias(col_name))
                     else:
                         selected_expressions.append(F.col(f"`{col_name}`"))
-                    
+
                     processed_target_cols.add(col_lower)
+
+        # 2. Also capture any dynamically added columns (like status_id) that don't exist in source_dfs
+        for col_name in current_df_cols:
+            col_lower = col_name.lower()
+
+            if col_lower in global_except_set:
+                continue
+
+            if col_lower not in processed_target_cols:
+                selected_expressions.append(F.col(f"`{col_name}`"))
+                processed_target_cols.add(col_lower)
 
         if selected_expressions:
             return df.select(*selected_expressions)
