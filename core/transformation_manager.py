@@ -43,15 +43,11 @@ class TransformationManager:
 
             if stage_type == "joins":
                 logger.info(f"Executing Stage {stage_idx}: JOINS...")
-                # CRITICAL: Always re-enforce the main alias right before doing joins
-                current_df = current_df.alias(self.main_alias)
                 current_df, joined_dfs = self._apply_joins(current_df, stage_data, joined_dfs)
 
             elif stage_type == "rules":
                 logger.info(f"Executing Stage {stage_idx}: RULES...")
                 current_df = self._apply_rules(current_df, stage_data)
-                # Re-apply main alias after transformations so PySpark logic retains main alias tag
-                current_df = current_df.alias(self.main_alias)
 
             joined_dfs[self.main_alias] = current_df
 
