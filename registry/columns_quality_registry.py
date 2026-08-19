@@ -73,7 +73,7 @@ class ColumnQualityRegistry:
         severity, when_cond, col_expr = ColumnQualityRegistry._extract_base_params(check, column)
         sql = f"""
         CASE
-            WHEN ({when_cond}) AND trim({col_expr}) = '')
+            WHEN ({when_cond}) AND trim({col_expr}) = ''
             THEN array('{column}_{error_suffix}')
             ELSE {ColumnQualityRegistry.EMPTY_ARRAY_SQL}
         END
@@ -181,7 +181,6 @@ class ColumnQualityRegistry:
         if not AllowedOperator.is_valid(operator):
             raise ValueError(f"Invalid operator '{operator}' in compare_columns check.")
 
-        # suffix يعكس العامودين المتقارنين
         error_suffix = f"COMPARE_ERROR"
 
         sql = f"""
