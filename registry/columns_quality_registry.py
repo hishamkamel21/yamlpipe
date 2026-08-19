@@ -69,17 +69,18 @@ class ColumnQualityRegistry:
 
     @staticmethod
     def not_empty_check(check: dict, column: str):
+        
         error_suffix = "EMPTY_ERROR"
         severity, when_cond, col_expr = ColumnQualityRegistry._extract_base_params(check, column)
         sql = f"""
         CASE
-            WHEN ({when_cond}) AND trim({col_expr}) = ''
+            WHEN ({when_cond}) AND {col_expr} IS NOT NULL AND trim(cast({col_expr} as string)) = ''
             THEN array('{column}_{error_suffix}')
             ELSE {ColumnQualityRegistry.EMPTY_ARRAY_SQL}
         END
         """
         return sql, severity, error_suffix
-
+    
     @staticmethod
     def regex_check(check: dict, column: str):
         error_suffix = "REGEX_ERROR"
