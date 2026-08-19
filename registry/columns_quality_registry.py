@@ -73,7 +73,7 @@ class ColumnQualityRegistry:
         severity, when_cond, col_expr = ColumnQualityRegistry._extract_base_params(check, column)
         sql = f"""
         CASE
-            WHEN ({when_cond}) AND ({col_expr} IS NULL OR trim({col_expr}) = '')
+            WHEN ({when_cond}) AND trim({col_expr}) = '')
             THEN array('{column}_{error_suffix}')
             ELSE {ColumnQualityRegistry.EMPTY_ARRAY_SQL}
         END
