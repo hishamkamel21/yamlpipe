@@ -38,6 +38,7 @@ class ReentrantFileLock:
                 del self._thread_local.locks[self.lock_file_path]
                 self.lock.release()
 
+
 class CacheManager:
 
     @staticmethod
@@ -126,11 +127,22 @@ class CacheManager:
         parsed_dir = os.path.join(project_root, "parsed", subfolder)
         os.makedirs(parsed_dir, exist_ok=True)
 
-        json_cache_path = os.path.join(parsed_dir, f"{selector}.json")
+        # ---------------------------------------------------------------------
+        # 1. Isolating locks in dedicated `.locks` directories
+        # ---------------------------------------------------------------------
+        parsed_locks_dir = os.path.join(parsed_dir, ".locks")
+        global_locks_dir = os.path.join(project_root, "parsed", ".locks")
+        
+        os.makedirs(parsed_locks_dir, exist_ok=True)
+        os.makedirs(global_locks_dir, exist_ok=True)
+
+        clean_selector_name = os.path.basename(selector).rsplit(".", 1)[0]
+        
+        json_cache_path = os.path.join(parsed_dir, f"{clean_selector_name}.json")
         hash_file_path = os.path.join(project_root, "parsed", "parsed_hash.yml")
 
-        resource_lock = ReentrantFileLock(os.path.join(parsed_dir, f".lock_{selector}"), timeout=30)
-        hash_lock = ReentrantFileLock(os.path.join(project_root, "parsed", ".hash_registry.lock"), timeout=30)
+        resource_lock = ReentrantFileLock(os.path.join(parsed_locks_dir, f".lock_{clean_selector_name}"), timeout=30)
+        hash_lock = ReentrantFileLock(os.path.join(global_locks_dir, ".hash_registry.lock"), timeout=30)
 
         try:
             with resource_lock:
@@ -237,18 +249,37 @@ class CacheManager:
         except Timeout:
             raise TimeoutError(f"[CacheManager Error] Lock timeout for '{subfolder}/{selector}'.")
 
+    # -------------------------------------------------------------------------
+    # 2. Deep recursive search inside subfolders for YAML files
+    # -------------------------------------------------------------------------
     @staticmethod
     def _resolve_yaml_file(project_root: str, subfolder: str, selector: str) -> str:
         clean_selector = selector.rsplit(".", 1)[0] if selector.endswith((".yaml", ".yml")) else selector
+        
         target_dir = (
             os.path.join(project_root, "vars")
             if subfolder == "vars"
             else os.path.join(project_root, "yaml_configs", subfolder)
         )
+
+        if not os.path.exists(target_dir):
+            raise FileNotFoundError(
+                f"[CacheManager Error] Target directory does not exist: '{target_dir}'"
+            )
+
+        # First Check: Direct match in the root folder
         for ext in (".yaml", ".yml"):
-            path = os.path.join(target_dir, f"{clean_selector}{ext}")
-            if os.path.exists(path):
-                return path
+            direct_path = os.path.join(target_dir, f"{clean_selector}{ext}")
+            if os.path.exists(direct_path):
+                return direct_path
+
+        # Second Check: Recursive search in all nested subdirectories
+        target_filenames = {f"{clean_selector}.yaml", f"{clean_selector}.yml"}
+        for root, _, files in os.walk(target_dir):
+            for file in files:
+                if file in target_filenames:
+                    return os.path.join(root, file)
+
         raise FileNotFoundError(
-            f"[CacheManager Error] YAML source file not found for '{clean_selector}' in '{subfolder}'."
+            f"[CacheManager Error] YAML source file not found for '{clean_selector}' inside '{target_dir}' or its subdirectories."
         )

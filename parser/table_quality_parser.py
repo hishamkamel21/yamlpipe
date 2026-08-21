@@ -2,6 +2,7 @@ import uuid
 from typing import Dict, Any, List
 from yamlpipe.registry.table_quality_checks import TableQualityRegistry
 from yamlpipe.core.vars_manager import VariablesManager
+from yamlpipe.utility.helper import Helper
 
 
 class TableQualityParser:
@@ -34,11 +35,26 @@ class TableQualityParser:
                 ref_view = f"tmp_ref_{uuid.uuid4().hex[:8]}"
 
                 ref_meta = check.get("ref") if isinstance(check.get("ref"), dict) else check
+                
+                table_cfg = ref_meta.get("table") or ref_meta.get("lookup_table")
+                path_source = ref_meta.get("path") or ref_meta.get("lookup_path")
+
+                parsed_table = None
+                if table_cfg:
+                    # تحويل الكائن (dict) إلى اسم جدول كامل بالشكل catalog.schema.table
+                    parsed_table = Helper.parse_table_name(table_cfg)
+
+                if not parsed_table and not path_source:
+                    raise ValueError(
+                        f"[{check_type.upper()} Error] Reference config must specify either a valid 'table' or 'path'. Config: {check}"
+                    )
+
                 view_metadata = {
                     "view_name": ref_view,
-                    "table": ref_meta.get("table") or ref_meta.get("lookup_table"),
-                    "path": ref_meta.get("path") or ref_meta.get("lookup_path"),
-                    "format": ref_meta.get("format", "delta")
+                    "table": parsed_table,
+                    "path": path_source,
+                    "format": ref_meta.get("format", "delta"),
+                    "filter": ref_meta.get("filter") or check.get("filter")
                 }
                 temp_views_to_create.append(view_metadata)
 
@@ -65,5 +81,3 @@ class TableQualityParser:
                 "temp_views_to_create": temp_views_to_create
             }
         }
-
-
