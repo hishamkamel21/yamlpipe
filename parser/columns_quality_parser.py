@@ -9,6 +9,7 @@ logger = logging.getLogger("ColumnQualityParser")
 
 class ColumnQualityParser:
 
+    # Check types that don't explicitly require 'column' key or 'for_each'/'columns' iteration
     ALLOWED_MULTI_COLUMN_CHECK_TYPES: Set[str] = {
         "custom",
         "compare",
@@ -91,7 +92,6 @@ class ColumnQualityParser:
 
             checks = entry.get("checks", [])
             
-            # إذا كانت الفحوصات مكتوبة كـ List تحت العامود
             if isinstance(checks, list) and checks:
                 for check in checks:
                     if not isinstance(check, dict):
@@ -99,7 +99,6 @@ class ColumnQualityParser:
                     resolved_check = TemplateResolver.resolve_placeholders(check, column_name)
                     yield resolved_check, column_name
 
-            # إذا كانت check_type على نفس المستوى مع column و compare_to قائمة (الشكل الجديد)
             elif check_type:
                 compare_to_list = entry.get("compare_to")
                 if isinstance(compare_to_list, list):
@@ -112,7 +111,7 @@ class ColumnQualityParser:
                     resolved_check = TemplateResolver.resolve_placeholders(entry, column_name)
                     yield resolved_check, column_name
 
-        # 2. Check-First Format
+        # 2. Check-First Format (e.g., check_type: not_future_time with for_each)
         elif check_type:
             if VariablesManager.is_var(check_type):
                 raise ValueError(f"Check-First format cannot use variables for 'check_type': '{check_type}'")
@@ -120,9 +119,10 @@ class ColumnQualityParser:
             check_type_str = str(check_type).lower().strip()
             has_iteration_list = bool(entry.get("columns") or entry.get("for_each"))
 
+            # Valid if it HAS a for_each/columns list OR if it's an allowed multi-column type without one
             if not has_iteration_list and check_type_str not in cls.ALLOWED_MULTI_COLUMN_CHECK_TYPES:
                 raise ValueError(
-                    f"Check-First entry with check_type '{check_type}' requires a 'columns' or 'for_each' list."
+                    f"Check-First entry with check_type '{check_type}' requires a 'columns' or 'for_each' list, or a single 'column'."
                 )
 
             expanded_checks = TemplateResolver.resolve_and_expand(entry)
