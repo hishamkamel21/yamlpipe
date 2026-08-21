@@ -1,34 +1,66 @@
-
-import hashlib
-import json
 import logging
 import os
 import shutil
-import threading
-import uuid
-from typing import Any, Dict, Optional
-from filelock import FileLock, Timeout
-from yamlpipe.utility.helper import Helper
-from yamlpipe.core.cache_manager import ReentrantFileLock
+from typing import Optional
 
-logger = logging.getLogger("CacheManager")
+# Import ReentrantFileLock from CacheManager to avoid duplication
+from yamlpipe.core.cache_manager import CacheManager, ReentrantFileLock
+from yamlpipe.utils.helper import Helper
+
+logger = logging.getLogger("Cleaner")
 
 
-def clean(cls, selector: Optional[str] = None, project_root: Optional[str] = None) -> None:
+class Cleaner:
+
+    @staticmethod
+    def _load_hashes(hash_file_path: str):
+        if not os.path.exists(hash_file_path):
+            return {}
+        try:
+            import yaml
+            with open(hash_file_path, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _save_hashes_atomic(hash_file_path: str, hash_data: dict) -> None:
+        import uuid
+        import yaml
+        unique_id = uuid.uuid4().hex
+        temp_hash_path = f"{hash_file_path}.tmp.{os.getpid()}_{unique_id}"
+        try:
+            with open(temp_hash_path, "w", encoding="utf-8") as f:
+                yaml.dump(hash_data, f, default_flow_style=False, sort_keys=True)
+            os.replace(temp_hash_path, hash_file_path)
+        except Exception as e:
+            if os.path.exists(temp_hash_path):
+                os.remove(temp_hash_path)
+            logger.error(f"[Cleaner Error] Failed updating hash index: {str(e)}")
+
+    @classmethod
+    def clean(cls, selector: Optional[str] = None, project_root: Optional[str] = None) -> None:
         """
         Cleans up parsed JSON files, locks, or hash index based on selector.
-        Dynamically finds project_root if not passed.
+        
+        Selectors supported:
+        - None / 'all'            : Deletes everything inside parsed/
+        - 'hashes'               : Deletes parsed/parsed_hash.yml
+        - 'transformation_rules' : Clears parsed/transformation_rules/
+        - 'quality_gate' / 'quality_rules' : Clears parsed/quality_gate/
+        - 'vars'                 : Clears parsed/vars/
+        - Specific Selector Name : e.g., 'customers' or 'subfolder/customers'
         """
         if project_root is None:
             project_root = Helper.find_project_root()
 
         parsed_dir = os.path.join(project_root, "parsed")
-        
+
         if not os.path.exists(parsed_dir):
-            logger.info("[CacheManager Clean] 'parsed' directory does not exist. Nothing to clean.")
+            logger.info("[Cleaner] 'parsed' directory does not exist. Nothing to clean.")
             return
 
-        # Map alias
+        # Map aliases
         if selector == "quality_rules":
             selector = "quality_gate"
 
@@ -39,7 +71,7 @@ def clean(cls, selector: Optional[str] = None, project_root: Optional[str] = Non
         )
 
         with global_hash_lock:
-            # 1. Clean All
+            # 1. Clean All (Everything inside parsed/)
             if selector is None or selector.lower() == "all":
                 for item in os.listdir(parsed_dir):
                     item_path = os.path.join(parsed_dir, item)
@@ -49,33 +81,34 @@ def clean(cls, selector: Optional[str] = None, project_root: Optional[str] = Non
                         elif os.path.isdir(item_path):
                             shutil.rmtree(item_path)
                     except Exception as e:
-                        logger.error(f"[CacheManager Clean Error] Failed to delete '{item_path}': {e}")
-                logger.info("[CacheManager Clean] Successfully purged all cached files and hash registry.")
+                        logger.error(f"[Cleaner Error] Failed to delete '{item_path}': {e}")
+                logger.info("[Cleaner] Successfully purged all cached files and hash registry.")
                 return
 
             hash_file_path = os.path.join(parsed_dir, "parsed_hash.yml")
 
-            # 2. Clean 'hashes' registry only
+            # 2. Clean 'hashes' registry file only
             if selector == "hashes":
                 if os.path.exists(hash_file_path):
                     os.remove(hash_file_path)
-                    logger.info("[CacheManager Clean] Successfully removed 'parsed_hash.yml'.")
+                    logger.info("[Cleaner] Successfully removed 'parsed_hash.yml'.")
                 return
 
-            # 3. Clean entire Subfolder
+            # 3. Clean full target subfolder
             if selector in ("transformation_rules", "quality_gate", "vars"):
                 target_subfolder = os.path.join(parsed_dir, selector)
                 if os.path.exists(target_subfolder):
                     shutil.rmtree(target_subfolder)
-                    logger.info(f"[CacheManager Clean] Removed all cached files in subfolder '{selector}'.")
+                    logger.info(f"[Cleaner] Removed all cached files in subfolder '{selector}'.")
 
+                # Sync parsed_hash.yml
                 all_hashes = cls._load_hashes(hash_file_path)
                 if selector in all_hashes:
                     all_hashes[selector] = {}
                     cls._save_hashes_atomic(hash_file_path, all_hashes)
                 return
 
-            # 4. Clean a single file selector
+            # 4. Clean a specific JSON cache file
             clean_name = os.path.basename(selector).rsplit(".", 1)[0]
             file_found = False
 
@@ -84,8 +117,9 @@ def clean(cls, selector: Optional[str] = None, project_root: Optional[str] = Non
                 if os.path.exists(candidate_path):
                     os.remove(candidate_path)
                     file_found = True
-                    logger.info(f"[CacheManager Clean] Removed cache file '{candidate_path}'.")
+                    logger.info(f"[Cleaner] Removed cache file '{candidate_path}'.")
 
+                    # Sync parsed_hash.yml
                     all_hashes = cls._load_hashes(hash_file_path)
                     if subfolder in all_hashes and selector in all_hashes[subfolder]:
                         del all_hashes[subfolder][selector]
@@ -93,4 +127,8 @@ def clean(cls, selector: Optional[str] = None, project_root: Optional[str] = Non
                     break
 
             if not file_found:
-                logger.warning(f"[CacheManager Clean Warning] No cache file found for selector '{selector}'.")
+                logger.warning(f"[Cleaner Warning] No cache file found for selector '{selector}'.")
+
+
+def clean(selector: Optional[str] = None, project_root: Optional[str] = None) -> None:
+    Cleaner.clean(selector=selector, project_root=project_root)
