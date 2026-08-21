@@ -3,7 +3,7 @@ import os
 import shutil
 from typing import Optional
 
-# Import ReentrantFileLock from CacheManager to avoid duplication
+# استيراد القفل من CacheManager والـ Helper لـ Project Root
 from yamlpipe.core.cache_manager import CacheManager, ReentrantFileLock
 from yamlpipe.utils.helper import Helper
 
@@ -42,14 +42,6 @@ class Cleaner:
     def clean(cls, selector: Optional[str] = None, project_root: Optional[str] = None) -> None:
         """
         Cleans up parsed JSON files, locks, or hash index based on selector.
-        
-        Selectors supported:
-        - None / 'all'            : Deletes everything inside parsed/
-        - 'hashes'               : Deletes parsed/parsed_hash.yml
-        - 'transformation_rules' : Clears parsed/transformation_rules/
-        - 'quality_gate' / 'quality_rules' : Clears parsed/quality_gate/
-        - 'vars'                 : Clears parsed/vars/
-        - Specific Selector Name : e.g., 'customers' or 'subfolder/customers'
         """
         if project_root is None:
             project_root = Helper.find_project_root()
@@ -130,5 +122,6 @@ class Cleaner:
                 logger.warning(f"[Cleaner Warning] No cache file found for selector '{selector}'.")
 
 
+# Standalone function wrapper
 def clean(selector: Optional[str] = None, project_root: Optional[str] = None) -> None:
     Cleaner.clean(selector=selector, project_root=project_root)
