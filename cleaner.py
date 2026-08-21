@@ -5,7 +5,7 @@ from typing import Optional
 
 # استيراد القفل من CacheManager والـ Helper لـ Project Root
 from yamlpipe.core.cache_manager import CacheManager, ReentrantFileLock
-from yamlpipe.utils.helper import Helper
+from yamlpipe.utility.helper import Helper
 
 logger = logging.getLogger("Cleaner")
 
