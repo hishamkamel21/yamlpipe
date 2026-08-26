@@ -11,14 +11,24 @@ class TransformationParser:
     def parse(
         cls,
         raw_config: Dict[str, Any],
+        file_map: Optional[Dict[str, Dict[str, Any]]] = None,
         schemas: Optional[Dict[str, List[str]]] = None,
+        visited_refs: Optional[Set[str]] = None,
     ) -> Dict[str, Any]:
+        """
+        Parses transformation configurations. Supports linked single files or full directories via 'run_ref'.
+        """
         if not isinstance(raw_config, dict):
             raise TypeError(
                 f"[TransformationParser Error] Expected dict configuration, got {type(raw_config).__name__}"
             )
 
-        clean_config = cls._sanitize_dict(raw_config)
+        file_map = file_map or {}
+        visited_refs = visited_refs or set()
+
+        # Resolve DAG / modular references first
+        resolved_config = cls._resolve_references(raw_config, file_map, visited_refs)
+        clean_config = cls._sanitize_dict(resolved_config)
 
         raw_table = clean_config.get("table", "unknown_table")
         main_alias = clean_config.get("alias", "c")
@@ -85,7 +95,7 @@ class TransformationParser:
         output = {
             "table": raw_table,
             "alias": main_alias,
-            "registered_aliases": list(set(registered_aliases)),
+            "registered_aliases": sorted(list(set(registered_aliases))),
             "stages": parsed_stages,
             "ContainVarsFrom": clean_config.get("ContainVarsFrom", []),
             "ContainFunctionsFrom": contained_functions,
@@ -95,6 +105,46 @@ class TransformationParser:
             output["schemas"] = schemas
 
         return output
+
+    @classmethod
+    def _resolve_references(
+        cls,
+        current_config: Dict[str, Any],
+        file_map: Dict[str, Dict[str, Any]],
+        visited_refs: Set[str]
+    ) -> Dict[str, Any]:
+        """
+        Recursively flattens dependencies linked through 'run_ref'.
+        """
+        ref_key = current_config.get("run_ref")
+        if not ref_key:
+            return current_config
+
+        if ref_key in visited_refs:
+            raise ValueError(f"[TransformationParser Error] Circular dependency detected in 'run_ref': {ref_key}")
+
+        if ref_key not in file_map:
+            raise KeyError(f"[TransformationParser Error] Reference target '{ref_key}' not found in folder scope.")
+
+        visited_refs.add(ref_key)
+        target_raw = file_map[ref_key]
+        
+        # Recursively resolve parent step if it also contains run_ref
+        parent_resolved = cls._resolve_references(target_raw, file_map, visited_refs)
+
+        # Merge base table/alias parameters from parent if not declared locally
+        merged_config = {
+            "table": current_config.get("table") or parent_resolved.get("table"),
+            "alias": current_config.get("alias") or parent_resolved.get("alias"),
+            "stages": []
+        }
+
+        # Prepend parent stages before current file stages
+        parent_stages = parent_resolved.get("stages", [])
+        current_stages = current_config.get("stages", [])
+
+        merged_config["stages"] = parent_stages + current_stages
+        return merged_config
 
     @classmethod
     def _extract_function_names(cls, data: Any) -> Set[str]:
