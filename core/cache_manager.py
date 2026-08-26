@@ -199,7 +199,7 @@ class CacheManager:
                                 valid = False
                                 break
 
-                        # 2. Check Custom Function Dependencies (from functions/)
+                        # 2. Check Custom Function Dependencies
                         if valid:
                             for func_name in func_deps:
                                 func_path = cls._resolve_function_path(project_root, func_name)
@@ -207,7 +207,7 @@ class CacheManager:
                                     valid = False
                                     break
 
-                        # 3. Check Custom Quality Check Dependencies (from custom_checks/)
+                        # 3. Check Custom Quality Check Dependencies
                         if valid:
                             for check_name in custom_check_deps:
                                 check_path = cls._resolve_custom_check_path(project_root, check_name)
@@ -255,6 +255,8 @@ class CacheManager:
 
                     if subfolder == "transformation_rules":
                         compiled_result = TransformationParser.parse(entry_config, file_map=file_map)
+                    elif subfolder == "quality_gate":
+                        compiled_result = QualityChecksParser.parse_quality_checks(entry_config)
                     else:
                         raise ValueError(f"Folder resolution not supported for subfolder '{subfolder}'")
 
@@ -301,7 +303,7 @@ class CacheManager:
                         func_path = cls._resolve_function_path(project_root, func_name)
                         latest_hashes["functions"][func_name] = cls._compute_md5(func_path)
 
-                    # Sync Custom Check MD5s (from custom_checks/)
+                    # Sync Custom Check MD5s
                     for check_name in compiled_result.get("ContainCustomChecksFrom", []):
                         check_path = cls._resolve_custom_check_path(project_root, check_name)
                         latest_hashes["custom_checks"][check_name] = cls._compute_md5(check_path)
