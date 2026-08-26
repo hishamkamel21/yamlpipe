@@ -4,7 +4,7 @@ import logging
 import os
 import threading
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Union
 from filelock import FileLock, Timeout
 
 logger = logging.getLogger("CacheManager")
@@ -43,7 +43,7 @@ class CacheManager:
 
     @staticmethod
     def _compute_md5(file_path: str) -> str:
-        """Calculates MD5 hash of a file to detect content changes."""
+        """Calculates MD5 hash of a single file to detect content changes."""
         hasher = hashlib.md5()
         try:
             with open(file_path, "rb") as f:
@@ -54,6 +54,37 @@ class CacheManager:
             raise FileNotFoundError(
                 f"[CacheManager Error] File missing for hashing: '{file_path}'"
             )
+
+    @classmethod
+    def _get_target_hashes(cls, target_path: str) -> Union[str, Dict[str, str]]:
+        """
+        Computes MD5 hash for a single file or a dictionary of filename-to-MD5 mappings 
+        for all YAML files inside a folder.
+        """
+        if os.path.isfile(target_path):
+            return cls._compute_md5(target_path)
+
+        if os.path.isdir(target_path):
+            folder_hashes: Dict[str, str] = {}
+            yaml_files = [
+                f for f in sorted(os.listdir(target_path))
+                if f.endswith((".yaml", ".yml"))
+            ]
+            if not yaml_files:
+                raise FileNotFoundError(
+                    f"[CacheManager Error] No YAML configurations found in folder: '{target_path}'"
+                )
+
+            for fname in yaml_files:
+                file_stem = fname.rsplit(".", 1)[0]
+                full_path = os.path.join(target_path, fname)
+                folder_hashes[file_stem] = cls._compute_md5(full_path)
+
+            return folder_hashes
+
+        raise FileNotFoundError(
+            f"[CacheManager Error] Target path does not exist: '{target_path}'"
+        )
 
     @staticmethod
     def _resolve_function_path(project_root: str, func_name: str) -> str:
@@ -123,13 +154,10 @@ class CacheManager:
         from yamlpipe.parser.quality_checks_parser import QualityChecksParser
         from yamlpipe.parser.transformation_parser import TransformationParser
 
-        raw_yaml_path = cls._resolve_yaml_file(project_root, subfolder, selector)
+        raw_target_path = cls._resolve_yaml_target(project_root, subfolder, selector)
         parsed_dir = os.path.join(project_root, "parsed", subfolder)
         os.makedirs(parsed_dir, exist_ok=True)
 
-        # ---------------------------------------------------------------------
-        # 1. Isolating locks in dedicated `.locks` directories
-        # ---------------------------------------------------------------------
         parsed_locks_dir = os.path.join(parsed_dir, ".locks")
         global_locks_dir = os.path.join(project_root, "parsed", ".locks")
         
@@ -146,7 +174,7 @@ class CacheManager:
 
         try:
             with resource_lock:
-                current_raw_hash = cls._compute_md5(raw_yaml_path)
+                current_raw_hash = cls._get_target_hashes(raw_target_path)
 
                 with hash_lock:
                     all_hashes = cls._load_hashes(hash_file_path)
@@ -166,8 +194,8 @@ class CacheManager:
 
                         # 1. Check Var Dependencies
                         for var_sel in var_deps:
-                            var_path = cls._resolve_yaml_file(project_root, "vars", var_sel)
-                            if cls._compute_md5(var_path) != all_hashes.get("vars", {}).get(var_sel):
+                            var_path = cls._resolve_yaml_target(project_root, "vars", var_sel)
+                            if cls._get_target_hashes(var_path) != all_hashes.get("vars", {}).get(var_sel):
                                 valid = False
                                 break
 
@@ -197,23 +225,59 @@ class CacheManager:
                 # Cache MISS -> Parse and re-index
                 logger.info(f"Cache MISS: Compiling YAML configuration '{subfolder}/{selector}'...")
 
-                with open(raw_yaml_path, "r", encoding="utf-8") as f:
-                    raw_config = yaml.safe_load(f) or {}
+                # Compilation logic handling directory vs single file
+                if os.path.isdir(raw_target_path):
+                    file_map: Dict[str, Dict[str, Any]] = {}
+                    for fname in sorted(os.listdir(raw_target_path)):
+                        if fname.endswith((".yaml", ".yml")):
+                            key_name = fname.rsplit(".", 1)[0]
+                            full_file_path = os.path.join(raw_target_path, fname)
+                            with open(full_file_path, "r", encoding="utf-8") as f:
+                                file_map[key_name] = yaml.safe_load(f) or {}
 
-                # Variable replacement step
-                if subfolder in ("transformation_rules", "quality_gate"):
-                    raw_config, referenced_vars_set = VariablesManager.extract_vars_and_parse(raw_config, project_root)
-                    raw_config["ContainVarsFrom"] = sorted(list(referenced_vars_set))
+                    # Variable replacement across all folder YAMLs
+                    if subfolder in ("transformation_rules", "quality_gate"):
+                        all_referenced_vars = set()
+                        for k, single_cfg in file_map.items():
+                            parsed_cfg, ref_vars = VariablesManager.extract_vars_and_parse(single_cfg, project_root)
+                            file_map[k] = parsed_cfg
+                            all_referenced_vars.update(ref_vars)
 
-                # Parser execution
-                if subfolder == "vars":
-                    compiled_result = raw_config
-                elif subfolder == "transformation_rules":
-                    compiled_result = TransformationParser.parse(raw_config)
-                elif subfolder == "quality_gate":
-                    compiled_result = QualityChecksParser.parse_quality_checks(raw_config)
+                    # Determine DAG terminal node
+                    referenced_keys = {cfg.get("run_ref") for cfg in file_map.values() if cfg.get("run_ref")}
+                    terminal_keys = set(file_map.keys()) - referenced_keys
+                    
+                    if not terminal_keys:
+                        raise ValueError(f"[CacheManager Error] Circular reference or missing root in folder '{selector}'")
+                    
+                    entry_key = next(iter(terminal_keys))
+                    entry_config = file_map[entry_key]
+
+                    if subfolder == "transformation_rules":
+                        compiled_result = TransformationParser.parse(entry_config, file_map=file_map)
+                    else:
+                        raise ValueError(f"Folder resolution not supported for subfolder '{subfolder}'")
+
+                    if subfolder in ("transformation_rules", "quality_gate"):
+                        compiled_result["ContainVarsFrom"] = sorted(list(all_referenced_vars))
+
                 else:
-                    raise ValueError(f"Unsupported subfolder: '{subfolder}'")
+                    # Single-file fallback mode
+                    with open(raw_target_path, "r", encoding="utf-8") as f:
+                        raw_config = yaml.safe_load(f) or {}
+
+                    if subfolder in ("transformation_rules", "quality_gate"):
+                        raw_config, referenced_vars_set = VariablesManager.extract_vars_and_parse(raw_config, project_root)
+                        raw_config["ContainVarsFrom"] = sorted(list(referenced_vars_set))
+
+                    if subfolder == "vars":
+                        compiled_result = raw_config
+                    elif subfolder == "transformation_rules":
+                        compiled_result = TransformationParser.parse(raw_config)
+                    elif subfolder == "quality_gate":
+                        compiled_result = QualityChecksParser.parse_quality_checks(raw_config)
+                    else:
+                        raise ValueError(f"Unsupported subfolder: '{subfolder}'")
 
                 # Atomic cache file write
                 unique_id = uuid.uuid4().hex
@@ -229,8 +293,8 @@ class CacheManager:
 
                     # Sync Variable MD5s
                     for var_sel in compiled_result.get("ContainVarsFrom", []):
-                        var_path = cls._resolve_yaml_file(project_root, "vars", var_sel)
-                        latest_hashes["vars"][var_sel] = cls._compute_md5(var_path)
+                        var_path = cls._resolve_yaml_target(project_root, "vars", var_sel)
+                        latest_hashes["vars"][var_sel] = cls._get_target_hashes(var_path)
 
                     # Sync Function MD5s
                     for func_name in compiled_result.get("ContainFunctionsFrom", []):
@@ -249,37 +313,42 @@ class CacheManager:
         except Timeout:
             raise TimeoutError(f"[CacheManager Error] Lock timeout for '{subfolder}/{selector}'.")
 
-    # -------------------------------------------------------------------------
-    # 2. Deep recursive search inside subfolders for YAML files
-    # -------------------------------------------------------------------------
     @staticmethod
-    def _resolve_yaml_file(project_root: str, subfolder: str, selector: str) -> str:
+    def _resolve_yaml_target(project_root: str, subfolder: str, selector: str) -> str:
+        """Resolves target path for either a file or folder in the project layout."""
         clean_selector = selector.rsplit(".", 1)[0] if selector.endswith((".yaml", ".yml")) else selector
         
-        target_dir = (
+        target_base = (
             os.path.join(project_root, "vars")
             if subfolder == "vars"
             else os.path.join(project_root, "yaml_configs", subfolder)
         )
 
-        if not os.path.exists(target_dir):
+        if not os.path.exists(target_base):
             raise FileNotFoundError(
-                f"[CacheManager Error] Target directory does not exist: '{target_dir}'"
+                f"[CacheManager Error] Target base directory does not exist: '{target_base}'"
             )
 
-        # First Check: Direct match in the root folder
-        for ext in (".yaml", ".yml"):
-            direct_path = os.path.join(target_dir, f"{clean_selector}{ext}")
-            if os.path.exists(direct_path):
-                return direct_path
+        # 1. Folder match check
+        folder_path = os.path.join(target_base, clean_selector)
+        if os.path.isdir(folder_path):
+            return folder_path
 
-        # Second Check: Recursive search in all nested subdirectories
+        # 2. File match check
+        for ext in (".yaml", ".yml"):
+            file_path = os.path.join(target_base, f"{clean_selector}{ext}")
+            if os.path.isfile(file_path):
+                return file_path
+
+        # 3. Recursive directory search
         target_filenames = {f"{clean_selector}.yaml", f"{clean_selector}.yml"}
-        for root, _, files in os.walk(target_dir):
+        for root, dirs, files in os.walk(target_base):
+            if clean_selector in dirs:
+                return os.path.join(root, clean_selector)
             for file in files:
                 if file in target_filenames:
                     return os.path.join(root, file)
 
         raise FileNotFoundError(
-            f"[CacheManager Error] YAML source file not found for '{clean_selector}' inside '{target_dir}' or its subdirectories."
+            f"[CacheManager Error] YAML source file or directory not found for '{clean_selector}' inside '{target_base}'."
         )
