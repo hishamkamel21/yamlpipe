@@ -4,7 +4,7 @@ import logging
 from typing import Optional, Dict, Any
 from yamlpipe.core.cache_manager import CacheManager
 from yamlpipe.utility.helper import Helper
-from yamlpipe.parsers.transformation_parser import TransformationParser
+from yamlpipe.parser.transformation_parser import TransformationParser
 
 logger = logging.getLogger("Getter")
 
