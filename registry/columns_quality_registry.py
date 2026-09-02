@@ -198,22 +198,39 @@ class ColumnQualityRegistry:
 
     
     @staticmethod
-    def is_type_check(check: dict, column: str):
+    def is_type_check(check: dict, column: str, use_try_fn: bool = True):
+        """
+        Generates type validation SQL expression.
+
+        :param check: Check dictionary definition.
+        :param column: Column target name.
+        :param use_try_fn: Set to True to output try_to_date/try_to_timestamp/try_cast.
+                           Set to False to output standard to_date/to_timestamp/cast.
+        """
         error_suffix = "TYPE_ERROR"
-        severity, when_cond, col_expr = ColumnQualityRegistry._extract_base_params(check, column)
+        severity, when_cond, col_expr = ColumnQualityRegistry._extract_base_params(
+            check, column
+        )
+
         if "expected_type" not in check or not check["expected_type"]:
-            raise KeyError(f"is_type check on column '{column}' requires 'expected_type'.")
+            raise KeyError(
+                f"is_type check on column '{column}' requires 'expected_type'."
+            )
 
         raw_type = str(check["expected_type"]).lower().strip()
         target_type = DataTypeAlias.normalize(raw_type)
         diff_formats = check.get("diff_formats", False)
 
         if diff_formats and target_type == "date":
-            parse_expr = Helper._get_date_formats_expr(col_expr)
-            cast_cond = f"{parse_expr} IS NULL"
+            parse_expr = Helper._get_date_formats_expr(
+                col_expr, use_try_fn=use_try_fn
+            )
+            cast_cond = f"({parse_expr} IS NULL)"
         elif diff_formats and target_type == "timestamp":
-            parse_expr = Helper._get_timestamp_formats_expr(col_expr)
-            cast_cond = f"{parse_expr} IS NULL"
+            parse_expr = Helper._get_timestamp_formats_expr(
+                col_expr, use_try_fn=use_try_fn
+            )
+            cast_cond = f"({parse_expr} IS NULL)"
         else:
             fmt = check.get("format")
             if not fmt or str(fmt).strip() == "":
@@ -223,24 +240,27 @@ class ColumnQualityRegistry:
                     fmt = "yyyy-MM-dd HH:mm:ss"
 
             if target_type == "date":
-                # Changed to_date to try_to_date
-                cast_cond = f"try_to_date({col_expr}, '{fmt}') IS NULL"
+                fn_name = "try_to_date" if use_try_fn else "to_date"
+                cast_cond = f"{fn_name}({col_expr}, '{fmt}') IS NULL"
             elif target_type == "timestamp":
-                # Changed to_timestamp to try_to_timestamp
-                cast_cond = f"try_to_timestamp({col_expr}, '{fmt}') IS NULL"
+                fn_name = "try_to_timestamp" if use_try_fn else "to_timestamp"
+                cast_cond = f"{fn_name}({col_expr}, '{fmt}') IS NULL"
             else:
-                cast_cond = f"try_cast({col_expr} AS {target_type}) IS NULL"
+                if use_try_fn:
+                    cast_cond = f"try_cast({col_expr} AS {target_type}) IS NULL"
+                else:
+                    cast_cond = f"cast({col_expr} AS {target_type}) IS NULL"
 
-        sql = f"""
-        CASE
+        sql = f"""CASE
             WHEN ({when_cond}) 
                  AND {col_expr} IS NOT NULL 
-                 AND ({cast_cond})
+                 AND {cast_cond}
             THEN array('{column}_{error_suffix}')
             ELSE {ColumnQualityRegistry.EMPTY_ARRAY_SQL}
-        END
-        """
+        END"""
+
         return sql, severity, error_suffix
+
     
     @staticmethod
     def not_future_date_check(check: dict, column: str):

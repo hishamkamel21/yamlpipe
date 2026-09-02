@@ -1,8 +1,14 @@
+"""
+Data Quality Enums and Type Normalization
+"""
+
 from enum import Enum
+import re
 
 
 class AllowedOperator(Enum):
     """Supported SQL comparison operators for data quality checks."""
+
     EQ = "="
     NEQ = "!="
     LT = "<"
@@ -13,15 +19,12 @@ class AllowedOperator(Enum):
     @classmethod
     def is_valid(cls, operator: str) -> bool:
         """Helper to validate if an operator string is supported."""
-        return operator in cls._value2member_map_
-
-
-from enum import Enum
-import re
+        return any(operator == item.value for item in cls)
 
 
 class DataTypeAlias(Enum):
     """Normalized Spark SQL data types and their aliases/common typos."""
+
     # Integers
     INT = "int"
     INTEGER = "int"
@@ -59,24 +62,23 @@ class DataTypeAlias(Enum):
     def normalize(cls, type_str: str) -> str:
         """
         Normalizes input string to canonical Spark SQL data type.
-        Supports base types and parameterized types like decimal(10,2).
+        Supports base types and parameterized types like decimal(10,2) or array<string>.
         """
         if not type_str:
             return "unknown"
 
         cleaned = str(type_str).strip().lower()
 
-        # Handle parameterized types (e.g., decimal(10, 2) -> decimal)
-        base_type = re.split(r"[\(\<]", cleaned)[0].strip()
+        # Extract base type and parameter suffix (e.g., decimal(10,2) or array<string>)
+        match = re.match(r"^([a-z0-9_]+)([\(\<].*)?$", cleaned)
+        if not match:
+            return cleaned
 
-        # Check against upper-case enum members
+        base_type, param_suffix = match.group(1), match.group(2) or ""
+
         upper_key = base_type.upper()
         if upper_key in cls.__members__:
             canonical_base = cls[upper_key].value
-            # Reattach parameters if original had them (e.g., decimal(10,2))
-            if "(" in cleaned:
-                param_suffix = cleaned[cleaned.find("("):]
-                return f"{canonical_base}{param_suffix}"
-            return canonical_base
+            return f"{canonical_base}{param_suffix}"
 
         return cleaned

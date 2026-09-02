@@ -151,27 +151,40 @@ class Helper:
         cleaned = re.sub(r'\s+', ' ', sql_expr).strip()
         return cleaned
 
-    @staticmethod 
-    def _get_date_formats_expr(column: str) -> str:
+    @staticmethod
+    def _get_date_formats_expr(column: str, use_try_fn: bool = True) -> str:
+        """
+        Generates a coalesce expression over multiple date format parsers.
+
+        :param column: Column name/expression to parse.
+        :param use_try_fn: If True, uses 'try_to_date'; otherwise uses 'to_date'.
+        """
         formats = [
-            "yyyy-MM-dd",        
-            "MM/dd/yyyy",          
-            "dd-MM-yyyy",          
-            "yyyy/MM/dd",          
+            "yyyy-MM-dd",
+            "MM/dd/yyyy",
+            "dd-MM-yyyy",
+            "yyyy/MM/dd",
             "dd/MM/yyyy",
-            "yyyyMMdd",          
-            "MM-dd-yyyy",   
-            "dd MMM yyyy",        
-            "dd MMMM yyyy"        
+            "yyyyMMdd",
+            "MM-dd-yyyy",
+            "dd MMM yyyy",
+            "dd MMMM yyyy",
         ]
-        
-        to_date_lines = [f'  try_to_date({column}, "{f}")' for f in formats]
-        inner_expr = ",\n".join(to_date_lines)
-        
+
+        fn_name = "try_to_date" if use_try_fn else "to_date"
+        date_lines = [f'  {fn_name}({column}, "{f}")' for f in formats]
+        inner_expr = ",\n".join(date_lines)
+
         return f"coalesce(\n{inner_expr}\n)"
 
-    @staticmethod 
-    def _get_timestamp_formats_expr(column: str) -> str:
+    @staticmethod
+    def _get_timestamp_formats_expr(column: str, use_try_fn: bool = True) -> str:
+        """
+        Generates a coalesce expression over multiple timestamp format parsers.
+
+        :param column: Column name/expression to parse.
+        :param use_try_fn: If True, uses 'try_to_timestamp'; otherwise uses 'to_timestamp'.
+        """
         formats = [
             "yyyy-MM-dd HH:mm:ss",
             "yyyy-MM-dd'T'HH:mm:ss",
@@ -186,10 +199,11 @@ class Helper:
             "dd-MM-yyyy HH:mm:ss",
             "yyyyMMddHHmmss",
             "dd MMM yyyy HH:mm:ss",
-            "dd MMMM yyyy HH:mm:ss"
+            "dd MMMM yyyy HH:mm:ss",
         ]
-        
-        to_timestamp_lines = [f'  try_to_timestamp({column}, "{f}")' for f in formats]
-        inner_expr = ",\n".join(to_timestamp_lines)
-        
+
+        fn_name = "try_to_timestamp" if use_try_fn else "to_timestamp"
+        ts_lines = [f'  {fn_name}({column}, "{f}")' for f in formats]
+        inner_expr = ",\n".join(ts_lines)
+
         return f"coalesce(\n{inner_expr}\n)"
