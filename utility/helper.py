@@ -165,7 +165,7 @@ class Helper:
             "dd MMMM yyyy"        
         ]
         
-        to_date_lines = [f'  to_date({column}, "{f}")' for f in formats]
+        to_date_lines = [f'  try_to_date({column}, "{f}")' for f in formats]
         inner_expr = ",\n".join(to_date_lines)
         
         return f"coalesce(\n{inner_expr}\n)"
@@ -189,7 +189,7 @@ class Helper:
             "dd MMMM yyyy HH:mm:ss"
         ]
         
-        to_timestamp_lines = [f'  to_timestamp({column}, "{f}")' for f in formats]
+        to_timestamp_lines = [f'  try_to_timestamp({column}, "{f}")' for f in formats]
         inner_expr = ",\n".join(to_timestamp_lines)
         
         return f"coalesce(\n{inner_expr}\n)"

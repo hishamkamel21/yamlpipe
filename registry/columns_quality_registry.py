@@ -196,6 +196,7 @@ class ColumnQualityRegistry:
         """
         return sql, severity, error_suffix
 
+    
     @staticmethod
     def is_type_check(check: dict, column: str):
         error_suffix = "TYPE_ERROR"
@@ -222,9 +223,11 @@ class ColumnQualityRegistry:
                     fmt = "yyyy-MM-dd HH:mm:ss"
 
             if target_type == "date":
-                cast_cond = f"to_date({col_expr}, '{fmt}') IS NULL"
+                # Changed to_date to try_to_date
+                cast_cond = f"try_to_date({col_expr}, '{fmt}') IS NULL"
             elif target_type == "timestamp":
-                cast_cond = f"to_timestamp({col_expr}, '{fmt}') IS NULL"
+                # Changed to_timestamp to try_to_timestamp
+                cast_cond = f"try_to_timestamp({col_expr}, '{fmt}') IS NULL"
             else:
                 cast_cond = f"try_cast({col_expr} AS {target_type}) IS NULL"
 
@@ -238,7 +241,7 @@ class ColumnQualityRegistry:
         END
         """
         return sql, severity, error_suffix
-
+    
     @staticmethod
     def not_future_date_check(check: dict, column: str):
         error_suffix = "FUTURE_DATE_ERROR"
