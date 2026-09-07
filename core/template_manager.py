@@ -1,7 +1,7 @@
 import copy
 import logging
 from typing import Any, Dict, List
-from yamlpipe.getter import Getter
+from yamlpipe.core.getter import Getter
 from yamlpipe.core.vars_manager import VariablesManager
 
 logger = logging.getLogger("TemplateManager")
@@ -32,7 +32,7 @@ class TemplateManager:
             if not isinstance(template_items, list):
                 raise ValueError(f"Invalid template format for '{template_name}'.")
 
-            # 1. Pre-resolve any variables inside with_vars dict
+            # 1. Resolve variables in with_vars dict
             resolved_with_vars = {}
             for k, v in with_vars.items():
                 if isinstance(v, str) and VariablesManager.is_var(v):
@@ -40,7 +40,7 @@ class TemplateManager:
                 else:
                     resolved_with_vars[k] = v
 
-            # 2. Replace set_var with actual values and return items to parser
+            # 2. Replace set_var blocks with actual values
             processed_rules: List[Dict[str, Any]] = []
             for rule_item in template_items:
                 if not isinstance(rule_item, dict):
@@ -58,15 +58,16 @@ class TemplateManager:
 
     @classmethod
     def _replace_set_var_with_values(cls, obj: Any, with_vars: Dict[str, Any]) -> Any:
-        """Replaces {set_var: var_name} with the actual value from with_vars."""
+        """Recursively replaces {set_var: var_key} or string placeholders with resolved values."""
         if isinstance(obj, dict):
+            # Target exact {set_var: ...} structures
             if len(obj) == 1 and "set_var" in obj:
                 var_key = obj["set_var"]
                 if var_key in with_vars:
                     val = with_vars[var_key]
                     if isinstance(val, str) and VariablesManager.is_var(val):
                         val = VariablesManager.resolve_var(val)
-                    return val
+                    return cls._replace_set_var_with_values(val, with_vars)
                 return obj
 
             return {
