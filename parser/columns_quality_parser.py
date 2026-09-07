@@ -144,5 +144,10 @@ class ColumnQualityParser:
 
             expanded_checks = TemplateResolver.resolve_and_expand(entry)
             for resolved_payload, col in expanded_checks:
-                fallback_col = col or resolved_payload.get("column") or "table_check"
-                yield resolved_payload, fallback_col
+                target_col = col or resolved_payload.get("column")
+                
+                # Skip generation if no real column was resolved (prevents generating 'table_check')
+                if not target_col or target_col == "table_check":
+                    continue
+                    
+                yield resolved_payload, target_col
