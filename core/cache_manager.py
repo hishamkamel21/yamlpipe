@@ -57,10 +57,6 @@ class CacheManager:
 
     @classmethod
     def _get_target_hashes(cls, target_path: str) -> Union[str, Dict[str, str]]:
-        """
-        Computes MD5 hash for a single file or a dictionary of filename-to-MD5 mappings 
-        for all YAML files inside a folder.
-        """
         if os.path.isfile(target_path):
             return cls._compute_md5(target_path)
 
@@ -88,23 +84,17 @@ class CacheManager:
 
     @staticmethod
     def _resolve_function_path(project_root: str, func_name: str) -> str:
-        """Resolves Python file path inside project_root/functions/."""
         func_path = os.path.join(project_root, "functions", f"{func_name}.py")
         if os.path.exists(func_path):
             return func_path
-        raise FileNotFoundError(
-            f"[CacheManager Error] Function file missing: '{func_path}'"
-        )
+        raise FileNotFoundError(f"[CacheManager Error] Function file missing: '{func_path}'")
 
     @staticmethod
     def _resolve_custom_check_path(project_root: str, check_name: str) -> str:
-        """Resolves Python file path inside project_root/custom_checks/."""
         check_path = os.path.join(project_root, "custom_checks", f"{check_name}.py")
         if os.path.exists(check_path):
             return check_path
-        raise FileNotFoundError(
-            f"[CacheManager Error] Custom check file missing: '{check_path}'"
-        )
+        raise FileNotFoundError(f"[CacheManager Error] Custom check file missing: '{check_path}'")
 
     @staticmethod
     def _load_hashes(hash_file_path: str) -> Dict[str, Any]:
@@ -112,6 +102,7 @@ class CacheManager:
             "transformation_rules": {},
             "quality_gate": {},
             "vars": {},
+            "templates": {},
             "functions": {},
             "custom_checks": {},
         }
@@ -160,12 +151,11 @@ class CacheManager:
 
         parsed_locks_dir = os.path.join(parsed_dir, ".locks")
         global_locks_dir = os.path.join(project_root, "parsed", ".locks")
-        
+
         os.makedirs(parsed_locks_dir, exist_ok=True)
         os.makedirs(global_locks_dir, exist_ok=True)
 
         clean_selector_name = os.path.basename(selector).rsplit(".", 1)[0]
-        
         json_cache_path = os.path.join(parsed_dir, f"{clean_selector_name}.json")
         hash_file_path = os.path.join(project_root, "parsed", "parsed_hash.yml")
 
@@ -188,6 +178,7 @@ class CacheManager:
                             cached_data = json.load(f)
 
                         var_deps = cached_data.get("ContainVarsFrom", [])
+                        template_deps = cached_data.get("ContainTemplatesFrom", [])
                         func_deps = cached_data.get("ContainFunctionsFrom", [])
                         custom_check_deps = cached_data.get("ContainCustomChecksFrom", [])
                         valid = True
@@ -199,7 +190,15 @@ class CacheManager:
                                 valid = False
                                 break
 
-                        # 2. Check Custom Function Dependencies
+                        # 2. Check Template Dependencies
+                        if valid:
+                            for tpl_sel in template_deps:
+                                tpl_path = cls._resolve_yaml_target(project_root, "templates", tpl_sel)
+                                if cls._get_target_hashes(tpl_path) != all_hashes.get("templates", {}).get(tpl_sel):
+                                    valid = False
+                                    break
+
+                        # 3. Check Custom Function Dependencies
                         if valid:
                             for func_name in func_deps:
                                 func_path = cls._resolve_function_path(project_root, func_name)
@@ -207,7 +206,7 @@ class CacheManager:
                                     valid = False
                                     break
 
-                        # 3. Check Custom Quality Check Dependencies
+                        # 4. Check Custom Check Dependencies
                         if valid:
                             for check_name in custom_check_deps:
                                 check_path = cls._resolve_custom_check_path(project_root, check_name)
@@ -225,7 +224,6 @@ class CacheManager:
                 # Cache MISS -> Parse and re-index
                 logger.info(f"Cache MISS: Compiling YAML configuration '{subfolder}/{selector}'...")
 
-                # Compilation logic handling directory vs single file
                 if os.path.isdir(raw_target_path):
                     file_map: Dict[str, Dict[str, Any]] = {}
                     for fname in sorted(os.listdir(raw_target_path)):
@@ -235,7 +233,6 @@ class CacheManager:
                             with open(full_file_path, "r", encoding="utf-8") as f:
                                 file_map[key_name] = yaml.safe_load(f) or {}
 
-                    # Variable replacement across all folder YAMLs
                     if subfolder in ("transformation_rules", "quality_gate"):
                         all_referenced_vars = set()
                         for k, single_cfg in file_map.items():
@@ -243,13 +240,12 @@ class CacheManager:
                             file_map[k] = parsed_cfg
                             all_referenced_vars.update(ref_vars)
 
-                    # Determine DAG terminal node
                     referenced_keys = {cfg.get("run_ref") for cfg in file_map.values() if cfg.get("run_ref")}
                     terminal_keys = set(file_map.keys()) - referenced_keys
-                    
+
                     if not terminal_keys:
                         raise ValueError(f"[CacheManager Error] Circular reference or missing root in folder '{selector}'")
-                    
+
                     entry_key = next(iter(terminal_keys))
                     entry_config = file_map[entry_key]
 
@@ -264,7 +260,7 @@ class CacheManager:
                         compiled_result["ContainVarsFrom"] = sorted(list(all_referenced_vars))
 
                 else:
-                    # Single-file fallback mode
+                    # Single-file mode
                     with open(raw_target_path, "r", encoding="utf-8") as f:
                         raw_config = yaml.safe_load(f) or {}
 
@@ -272,7 +268,7 @@ class CacheManager:
                         raw_config, referenced_vars_set = VariablesManager.extract_vars_and_parse(raw_config, project_root)
                         raw_config["ContainVarsFrom"] = sorted(list(referenced_vars_set))
 
-                    if subfolder == "vars":
+                    if subfolder in ("vars", "templates"):
                         compiled_result = raw_config
                     elif subfolder == "transformation_rules":
                         compiled_result = TransformationParser.parse(raw_config)
@@ -288,22 +284,23 @@ class CacheManager:
                     json.dump(compiled_result, f, indent=4, ensure_ascii=False)
                 os.replace(temp_json_path, json_cache_path)
 
-                # Atomic update to global hashes registry
+                # Update global hashes registry
                 with hash_lock:
                     latest_hashes = cls._load_hashes(hash_file_path)
                     latest_hashes.setdefault(subfolder, {})[selector] = current_raw_hash
 
-                    # Sync Variable MD5s
                     for var_sel in compiled_result.get("ContainVarsFrom", []):
                         var_path = cls._resolve_yaml_target(project_root, "vars", var_sel)
                         latest_hashes["vars"][var_sel] = cls._get_target_hashes(var_path)
 
-                    # Sync Function MD5s
+                    for tpl_sel in compiled_result.get("ContainTemplatesFrom", []):
+                        tpl_path = cls._resolve_yaml_target(project_root, "templates", tpl_sel)
+                        latest_hashes["templates"][tpl_sel] = cls._get_target_hashes(tpl_path)
+
                     for func_name in compiled_result.get("ContainFunctionsFrom", []):
                         func_path = cls._resolve_function_path(project_root, func_name)
                         latest_hashes["functions"][func_name] = cls._compute_md5(func_path)
 
-                    # Sync Custom Check MD5s
                     for check_name in compiled_result.get("ContainCustomChecksFrom", []):
                         check_path = cls._resolve_custom_check_path(project_root, check_name)
                         latest_hashes["custom_checks"][check_name] = cls._compute_md5(check_path)
@@ -317,32 +314,27 @@ class CacheManager:
 
     @staticmethod
     def _resolve_yaml_target(project_root: str, subfolder: str, selector: str) -> str:
-        """Resolves target path for either a file or folder in the project layout."""
         clean_selector = selector.rsplit(".", 1)[0] if selector.endswith((".yaml", ".yml")) else selector
-        
-        target_base = (
-            os.path.join(project_root, "vars")
-            if subfolder == "vars"
-            else os.path.join(project_root, "yaml_configs", subfolder)
-        )
+
+        if subfolder == "vars":
+            target_base = os.path.join(project_root, "vars")
+        elif subfolder == "templates":
+            target_base = os.path.join(project_root, "templates")  # Root-level ONLY
+        else:
+            target_base = os.path.join(project_root, "yaml_configs", subfolder)
 
         if not os.path.exists(target_base):
-            raise FileNotFoundError(
-                f"[CacheManager Error] Target base directory does not exist: '{target_base}'"
-            )
+            raise FileNotFoundError(f"[CacheManager Error] Directory does not exist: '{target_base}'")
 
-        # 1. Folder match check
         folder_path = os.path.join(target_base, clean_selector)
         if os.path.isdir(folder_path):
             return folder_path
 
-        # 2. File match check
         for ext in (".yaml", ".yml"):
             file_path = os.path.join(target_base, f"{clean_selector}{ext}")
             if os.path.isfile(file_path):
                 return file_path
 
-        # 3. Recursive directory search
         target_filenames = {f"{clean_selector}.yaml", f"{clean_selector}.yml"}
         for root, dirs, files in os.walk(target_base):
             if clean_selector in dirs:
@@ -352,5 +344,5 @@ class CacheManager:
                     return os.path.join(root, file)
 
         raise FileNotFoundError(
-            f"[CacheManager Error] YAML source file or directory not found for '{clean_selector}' inside '{target_base}'."
+            f"[CacheManager Error] Source file or directory not found for '{clean_selector}' inside '{target_base}'."
         )

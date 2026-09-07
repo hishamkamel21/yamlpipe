@@ -1,15 +1,15 @@
+import logging
 import os
 import yaml
-import logging
 
 logger = logging.getLogger("ProjectSetter")
 
 
 def set_project(project_dir: str = ".") -> str:
-    """
-    Creates project directory structure including raw YAML configs, 
-    custom modules, variable definitions, compilation cache directories,
-    project.yml, and .gitignore file inside the target project directory.
+    """Creates project directory structure including raw YAML configs, custom modules,
+
+    variable definitions, templates, compilation cache directories, project.yml,
+    and .gitignore file inside the target project directory.
     """
     try:
         target_dir = os.path.abspath(project_dir)
@@ -20,12 +20,14 @@ def set_project(project_dir: str = ".") -> str:
             os.path.join(target_dir, "functions"),
             os.path.join(target_dir, "pipeline"),
             os.path.join(target_dir, "vars"),
+            os.path.join(target_dir, "templates"),  # Root-level ONLY
             os.path.join(target_dir, "yaml_configs", "transformation_rules"),
             os.path.join(target_dir, "yaml_configs", "quality_gate"),
             # Dynamic Compilation Cache Folders
             os.path.join(target_dir, "parsed", "transformation_rules"),
             os.path.join(target_dir, "parsed", "quality_gate"),
             os.path.join(target_dir, "parsed", "vars"),
+            os.path.join(target_dir, "parsed", "templates"),
         ]
 
         for folder in folders:
@@ -36,7 +38,7 @@ def set_project(project_dir: str = ".") -> str:
         project_config = {
             "project": {
                 "name": os.path.basename(target_dir),
-                "project_dir": target_dir
+                "project_dir": target_dir,
             }
         }
 

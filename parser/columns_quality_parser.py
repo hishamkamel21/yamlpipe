@@ -1,5 +1,6 @@
 import logging
 from typing import Any, Dict, Generator, List, Set, Tuple
+from yamlpipe.core.template_manager import TemplateManager
 from yamlpipe.core.vars_manager import VariablesManager
 from yamlpipe.registry.columns_quality_registry import ColumnQualityRegistry
 from yamlpipe.utility.placeholder_resolver import TemplateResolver
@@ -24,15 +25,52 @@ class ColumnQualityParser:
             return {
                 "columns_checks": {"error_expr": [], "warn_expr": []},
                 "registered_error_suffixes": [],
-                "ContainCustomChecksFrom": []
+                "ContainCustomChecksFrom": [],
+                "ContainTemplatesFrom": []
             }
+
+        templates_used: Set[str] = set()
+        expanded_columns_checks: List[Dict[str, Any]] = []
+
+        # 1. Pre-pass: Handle `inject_template` entries
+        for col_entry in columns_checks_config:
+            if not isinstance(col_entry, dict):
+                continue
+
+            if "inject_template" in col_entry:
+                inject_info = col_entry["inject_template"]
+                template_name = inject_info.get("name")
+                raw_with_vars = inject_info.get("with", {})
+
+                if template_name:
+                    templates_used.add(template_name)
+
+                    # Resolve any `${var...}` references passed in the `with:` block
+                    resolved_with_vars = {}
+                    for var_key, var_val in raw_with_vars.items():
+                        if isinstance(var_val, str) and VariablesManager.is_var(var_val):
+                            resolved_with_vars[var_key] = VariablesManager.resolve_var(var_val)
+                        else:
+                            resolved_with_vars[var_key] = var_val
+
+                    # Call TemplateManager to load template via Getter/CacheManager and substitute vars
+                    resolved_checks = TemplateManager.inject_handler(
+                        template_name=template_name,
+                        with_vars=resolved_with_vars
+                    )
+
+                    if isinstance(resolved_checks, list):
+                        expanded_columns_checks.extend(resolved_checks)
+            else:
+                expanded_columns_checks.append(col_entry)
 
         error_expressions: List[str] = []
         warn_expressions: List[str] = []
         registered_error_suffixes: Set[str] = set()
         custom_checks_used: Set[str] = set()
 
-        for col_entry in columns_checks_config:
+        # 2. Parse final unrolled checks
+        for col_entry in expanded_columns_checks:
             if not isinstance(col_entry, dict):
                 logger.warning(f"Skipping invalid column entry: {col_entry}")
                 continue
@@ -77,7 +115,8 @@ class ColumnQualityParser:
                 "warn_expr": warn_expressions
             },
             "registered_error_suffixes": sorted(list(registered_error_suffixes)),
-            "ContainCustomChecksFrom": sorted(list(custom_checks_used))
+            "ContainCustomChecksFrom": sorted(list(custom_checks_used)),
+            "ContainTemplatesFrom": sorted(list(templates_used))
         }
 
     @classmethod

@@ -300,7 +300,7 @@ class ColumnQualityRegistry:
 
             sql = f"""
             CASE
-                WHEN ({when_cond}) AND ({sql_condition})
+                WHEN ({when_cond}) AND NOT ({sql_condition})
                 THEN array('{column}_{error_suffix}')
                 ELSE {ColumnQualityRegistry.EMPTY_ARRAY_SQL}
             END
