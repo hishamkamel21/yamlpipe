@@ -45,15 +45,10 @@ class ColumnQualityParser:
                 if template_name:
                     templates_used.add(template_name)
 
-                    # Resolve any `${var...}` references passed in the `with:` block
-                    resolved_with_vars = {}
-                    for var_key, var_val in raw_with_vars.items():
-                        if isinstance(var_val, str) and VariablesManager.is_var(var_val):
-                            resolved_with_vars[var_key] = VariablesManager.resolve_var(var_val)
-                        else:
-                            resolved_with_vars[var_key] = var_val
+                    # Recursively resolve any `${var...}` references passed in `with:`
+                    resolved_with_vars = cls._resolve_with_variables(raw_with_vars)
 
-                    # Call TemplateManager to load template via Getter/CacheManager and substitute vars
+                    # Call TemplateManager to load template and substitute vars
                     resolved_checks = TemplateManager.inject_handler(
                         template_name=template_name,
                         with_vars=resolved_with_vars
@@ -120,6 +115,17 @@ class ColumnQualityParser:
         }
 
     @classmethod
+    def _resolve_with_variables(cls, val: Any) -> Any:
+        """Recursively resolves ${var...} strings within the 'with' structure."""
+        if isinstance(val, str) and VariablesManager.is_var(val):
+            return VariablesManager.resolve_var(val)
+        elif isinstance(val, dict):
+            return {k: cls._resolve_with_variables(v) for k, v in val.items()}
+        elif isinstance(val, list):
+            return [cls._resolve_with_variables(item) for item in val]
+        return val
+
+    @classmethod
     def _for_each_column(cls, entry: Dict[str, Any]) -> Generator[Tuple[Dict[str, Any], str], None, None]:
         column_name = entry.get("column")
         check_type = entry.get("check_type") or entry.get("type")
@@ -150,19 +156,35 @@ class ColumnQualityParser:
                     resolved_check = TemplateResolver.resolve_placeholders(entry, column_name)
                     yield resolved_check, column_name
 
-        # 2. Check-First Format (e.g., check_type: not_future_time with for_each)
+        # 2. Check-First Format (e.g., check_type: not_null with for_each)
         elif check_type:
             if VariablesManager.is_var(check_type):
                 raise ValueError(f"Check-First format cannot use variables for 'check_type': '{check_type}'")
 
             check_type_str = str(check_type).lower().strip()
-            has_iteration_list = bool(entry.get("columns") or entry.get("for_each"))
+            raw_targets = entry.get("columns") or entry.get("for_each") or entry.get("column")
 
-            # Valid if it HAS a for_each/columns list OR if it's an allowed multi-column type without one
-            if not has_iteration_list and check_type_str not in cls.ALLOWED_MULTI_COLUMN_CHECK_TYPES:
-                raise ValueError(
-                    f"Check-First entry with check_type '{check_type}' requires a 'columns' or 'for_each' list, or a single 'column'."
+            # Check if targets are unresolved set_var dictionaries
+            if isinstance(raw_targets, dict) and "set_var" in raw_targets:
+                logger.warning(
+                    f"Skipping check_type '{check_type}' because target variable "
+                    f"'{raw_targets.get('set_var')}' was not provided or failed to expand."
                 )
+                return
+
+            # Determine whether a valid iteration list or string exists
+            has_iteration_list = False
+            if isinstance(raw_targets, list) and len(raw_targets) > 0:
+                has_iteration_list = True
+            elif isinstance(raw_targets, str) and raw_targets.strip():
+                has_iteration_list = True
+
+            # If no targets exist and check_type requires columns, warn and skip gracefully
+            if not has_iteration_list and check_type_str not in cls.ALLOWED_MULTI_COLUMN_CHECK_TYPES:
+                logger.warning(
+                    f"Skipping check_type '{check_type}' because target column list is empty or undefined."
+                )
+                return
 
             expanded_checks = TemplateResolver.resolve_and_expand(entry)
             for resolved_payload, col in expanded_checks:
