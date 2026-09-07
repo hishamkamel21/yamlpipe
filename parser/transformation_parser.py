@@ -62,13 +62,13 @@ class TransformationParser:
                         for rule_item in raw_rules:
                             if isinstance(rule_item, dict):
                                 sanitized_rule = cls._sanitize_dict(rule_item)
-                                
+
                                 # Intercept template injection
                                 if "inject_template" in sanitized_rule:
                                     template_cfg = sanitized_rule["inject_template"]
                                     template_name = template_cfg.get("name")
                                     with_vars = template_cfg.get("with", {})
-                                    
+
                                     if template_name:
                                         contain_templates_from.add(template_name)
                                         injected_rules = TemplateManager.inject_handler(
@@ -76,11 +76,15 @@ class TransformationParser:
                                             with_vars=with_vars
                                         )
                                         for inj_rule in injected_rules:
+                                            if not inj_rule:
+                                                continue
                                             expanded = TransformationRegistry.process_rule(inj_rule)
-                                            parsed_rules.extend(expanded)
+                                            if expanded:
+                                                parsed_rules.extend(expanded)
                                 else:
                                     expanded = TransformationRegistry.process_rule(sanitized_rule)
-                                    parsed_rules.extend(expanded)
+                                    if expanded:
+                                        parsed_rules.extend(expanded)
 
                     parsed_stages.append({"type": "rules", "data": parsed_rules})
 
@@ -103,13 +107,13 @@ class TransformationParser:
                 for rule_item in raw_rules:
                     if isinstance(rule_item, dict):
                         sanitized_rule = cls._sanitize_dict(rule_item)
-                        
+
                         # Intercept template injection
                         if "inject_template" in sanitized_rule:
                             template_cfg = sanitized_rule["inject_template"]
                             template_name = template_cfg.get("name")
                             with_vars = template_cfg.get("with", {})
-                            
+
                             if template_name:
                                 contain_templates_from.add(template_name)
                                 injected_rules = TemplateManager.inject_handler(
@@ -117,11 +121,15 @@ class TransformationParser:
                                     with_vars=with_vars
                                 )
                                 for inj_rule in injected_rules:
+                                    if not inj_rule:
+                                        continue
                                     expanded = TransformationRegistry.process_rule(inj_rule)
-                                    parsed_rules.extend(expanded)
+                                    if expanded:
+                                        parsed_rules.extend(expanded)
                         else:
                             expanded = TransformationRegistry.process_rule(sanitized_rule)
-                            parsed_rules.extend(expanded)
+                            if expanded:
+                                parsed_rules.extend(expanded)
 
             if parsed_rules:
                 parsed_stages.append({"type": "rules", "data": parsed_rules})
@@ -164,7 +172,7 @@ class TransformationParser:
 
         visited_refs.add(ref_key)
         target_raw = file_map[ref_key]
-        
+
         parent_resolved = cls._resolve_references(target_raw, file_map, visited_refs)
 
         merged_config = {

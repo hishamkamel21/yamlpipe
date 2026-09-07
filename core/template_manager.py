@@ -1,6 +1,6 @@
 import copy
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from yamlpipe.getter import Getter
 from yamlpipe.core.vars_manager import VariablesManager
 
@@ -40,21 +40,45 @@ class TemplateManager:
                 else:
                     resolved_with_vars[k] = v
 
-            # 2. Replace set_var blocks with actual values
+            # 2. Process rules and drop rules bound to missing/empty variables
             processed_rules: List[Dict[str, Any]] = []
             for rule_item in template_items:
                 if not isinstance(rule_item, dict):
                     continue
 
                 rule_copy = copy.deepcopy(rule_item)
+
+                # Check if rule has a for_each dependent on an missing/empty variable
+                if cls._should_drop_rule(rule_copy, resolved_with_vars):
+                    continue
+
                 resolved_rule = cls._replace_set_var_with_values(rule_copy, resolved_with_vars)
-                processed_rules.append(resolved_rule)
+                if resolved_rule:
+                    processed_rules.append(resolved_rule)
 
             return processed_rules
 
         except Exception as e:
             logger.error(f"[TemplateManager Error] Failed to inject template '{template_name}': {str(e)}")
             raise e
+
+    @classmethod
+    def _should_drop_rule(cls, rule: Dict[str, Any], with_vars: Dict[str, Any]) -> bool:
+        """Determines if a rule depends on an unprovided or empty variable (e.g. set_var)."""
+        for_each_target = rule.get("for_each")
+        if for_each_target and isinstance(for_each_target, dict) and "set_var" in for_each_target:
+            var_key = for_each_target["set_var"]
+            resolved_val = with_vars.get(var_key)
+
+            # Resolve if it points to a VariablesManager variable
+            if isinstance(resolved_val, str) and VariablesManager.is_var(resolved_val):
+                resolved_val = VariablesManager.resolve_var(resolved_val)
+
+            # Drop rule if variable is not provided, is None, or is an empty structure
+            if resolved_val is None or resolved_val == [] or resolved_val == "":
+                return True
+
+        return False
 
     @classmethod
     def _replace_set_var_with_values(cls, obj: Any, with_vars: Dict[str, Any]) -> Any:
@@ -68,15 +92,17 @@ class TemplateManager:
                     if isinstance(val, str) and VariablesManager.is_var(val):
                         val = VariablesManager.resolve_var(val)
                     return cls._replace_set_var_with_values(val, with_vars)
-                return obj
+                return None  # Unresolved set_var resolves to None
 
             return {
                 k: cls._replace_set_var_with_values(v, with_vars)
                 for k, v in obj.items()
+                if cls._replace_set_var_with_values(v, with_vars) is not None
             }
 
         elif isinstance(obj, list):
-            return [cls._replace_set_var_with_values(item, with_vars) for item in obj]
+            items = [cls._replace_set_var_with_values(item, with_vars) for item in obj]
+            return [i for i in items if i is not None]
 
         elif isinstance(obj, str):
             if VariablesManager.is_var(obj):
