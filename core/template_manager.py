@@ -1,3 +1,4 @@
+
 import copy
 import logging
 from typing import Any, Dict, List
@@ -15,16 +16,17 @@ class TemplateManager:
         cls, template_name: str, with_vars: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
         """
-        Loads a transformation or quality template by name, replaces all set_var
-        and variable placeholders using the 'with' dictionary, expands loops (for_each),
-        and returns the flattened list of rule dictionaries.
+        Loads a quality or transformation template by name, resolves all 'with' 
+        variables, replaces set_var definitions, expands for_each column loops, 
+        and returns clean, unrolled rule dictionaries ready for the parser.
         """
         try:
+            # 1. Fetch raw template content
             raw_template_data = Getter.get_templates(template_name)
             if not raw_template_data:
                 raise ValueError(f"Template '{template_name}' was empty or not found.")
 
-            # Extract list from 'rules', 'columns_checks', 'template', or 'checks'
+            # 2. Extract rules list from supported root keys
             template_items = None
             if isinstance(raw_template_data, dict):
                 template_items = (
@@ -42,27 +44,36 @@ class TemplateManager:
                     f"Expected a list under 'columns_checks', 'rules', or 'template'."
                 )
 
+            # 3. PRE-RESOLVE ${var...} references inside with_vars into actual lists/values
+            resolved_with_vars: Dict[str, Any] = {}
+            for k, v in with_vars.items():
+                if isinstance(v, str) and VariablesManager.is_var(v):
+                    resolved_with_vars[k] = VariablesManager.resolve_var(v)
+                else:
+                    resolved_with_vars[k] = v
+
             expanded_rules: List[Dict[str, Any]] = []
 
+            # 4. Process each rule inside the template
             for rule_item in template_items:
                 if not isinstance(rule_item, dict):
                     continue
 
                 rule_copy = copy.deepcopy(rule_item)
 
-                # Recursively resolve all set_var mappings and ${var} values
-                resolved_rule = cls._resolve_all_set_vars_and_vars(rule_copy, with_vars)
+                # Recursively replace all set_var maps and variable string placeholders
+                resolved_rule = cls._resolve_all_set_vars_and_vars(rule_copy, resolved_with_vars)
 
-                # Skip rule if a required set_var target was omitted in with_vars
+                # Skip rule if a required set_var parameter was omitted in 'with'
                 if cls._has_unresolved_set_var(resolved_rule):
                     logger.debug(
                         f"Skipping rule in template '{template_name}' because a required set_var target was not passed in 'with'."
                     )
                     continue
 
-                # Expand loops (for_each / columns) into concrete rule instances
+                # Expand for_each / columns loops into explicit per-column check dictionaries
                 if "for_each" in resolved_rule or "columns" in resolved_rule:
-                    expanded_items = cls._expand_template_loop(resolved_rule, with_vars)
+                    expanded_items = cls._expand_template_loop(resolved_rule, resolved_with_vars)
                     expanded_rules.extend(expanded_items)
                 else:
                     expanded_rules.append(resolved_rule)
@@ -75,11 +86,21 @@ class TemplateManager:
 
     @classmethod
     def _resolve_all_set_vars_and_vars(cls, obj: Any, with_vars: Dict[str, Any]) -> Any:
+        """
+        Recursively replaces set_var dictionaries and variable strings:
+        - `{"set_var": "my_key"}` -> replaces with `with_vars["my_key"]`
+        - `"${my_key}"` -> replaces with `with_vars["my_key"]`
+        - `"${var.path.val}"` -> resolves via `VariablesManager.resolve_var`
+        """
         if isinstance(obj, dict):
+            # Resolve standalone set_var dicts: {"set_var": "var_name"}
             if len(obj) == 1 and "set_var" in obj:
                 var_key = obj["set_var"]
                 if var_key in with_vars:
-                    return cls._resolve_all_set_vars_and_vars(with_vars[var_key], with_vars)
+                    val = with_vars[var_key]
+                    if isinstance(val, str) and VariablesManager.is_var(val):
+                        val = VariablesManager.resolve_var(val)
+                    return cls._resolve_all_set_vars_and_vars(val, with_vars)
                 return obj
 
             return {
@@ -91,10 +112,11 @@ class TemplateManager:
             return [cls._resolve_all_set_vars_and_vars(item, with_vars) for item in obj]
 
         elif isinstance(obj, str):
-            # Resolve variable syntax ${var.path.to.val} from VariablesManager
+            # Direct variable reference like ${var.cust.on_null_error}
             if VariablesManager.is_var(obj):
                 return VariablesManager.resolve_var(obj)
 
+            # In-string template substitution like "column_${col_name}"
             for key, val in with_vars.items():
                 target_placeholder = f"${{{key}}}"
                 if obj == target_placeholder:
@@ -107,6 +129,9 @@ class TemplateManager:
 
     @classmethod
     def _has_unresolved_set_var(cls, obj: Any) -> bool:
+        """
+        Checks if an unfulfilled `set_var` dict remains in the payload.
+        """
         if isinstance(obj, dict):
             if "set_var" in obj and len(obj) == 1:
                 return True
@@ -119,9 +144,18 @@ class TemplateManager:
     def _expand_template_loop(
         cls, check_entry: Dict[str, Any], with_vars: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
+        """
+        Expands for_each / columns targets into concrete per-column dictionaries.
+        """
         results: List[Dict[str, Any]] = []
         raw_targets = check_entry.get("for_each") or check_entry.get("columns")
 
+        # Extract target if raw_targets is set_var dict
+        if isinstance(raw_targets, dict) and "set_var" in raw_targets:
+            var_key = raw_targets["set_var"]
+            raw_targets = with_vars.get(var_key)
+
+        # Extract target if raw_targets is a string variable
         if isinstance(raw_targets, str):
             if VariablesManager.is_var(raw_targets):
                 raw_targets = VariablesManager.resolve_var(raw_targets)
@@ -131,6 +165,7 @@ class TemplateManager:
         if not isinstance(raw_targets, list):
             return [check_entry]
 
+        # Expand each column item and resolve ${col} placeholders
         for target_col in raw_targets:
             if not target_col:
                 continue
