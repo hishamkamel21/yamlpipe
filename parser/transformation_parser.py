@@ -1,6 +1,7 @@
 import logging
 from typing import Dict, Any, List, Set, Optional
 from yamlpipe.registry.transformation_registry import TransformationRegistry
+from yamlpipe.core.template_manager import TemplateManager
 
 logger = logging.getLogger("TransformationParser")
 
@@ -35,6 +36,7 @@ class TransformationParser:
 
         parsed_stages: List[Dict[str, Any]] = []
         registered_aliases: List[str] = [main_alias]
+        contain_templates_from: Set[str] = set()
 
         if "stages" in clean_config and isinstance(clean_config["stages"], list):
             for stage in clean_config["stages"]:
@@ -60,8 +62,26 @@ class TransformationParser:
                         for rule_item in raw_rules:
                             if isinstance(rule_item, dict):
                                 sanitized_rule = cls._sanitize_dict(rule_item)
-                                expanded = TransformationRegistry.process_rule(sanitized_rule)
-                                parsed_rules.extend(expanded)
+                                
+                                # Intercept template injection
+                                if "inject_template" in sanitized_rule:
+                                    template_cfg = sanitized_rule["inject_template"]
+                                    template_name = template_cfg.get("name")
+                                    with_vars = template_cfg.get("with", {})
+                                    
+                                    if template_name:
+                                        contain_templates_from.add(template_name)
+                                        injected_rules = TemplateManager.inject_handler(
+                                            template_name=template_name,
+                                            with_vars=with_vars
+                                        )
+                                        for inj_rule in injected_rules:
+                                            expanded = TransformationRegistry.process_rule(inj_rule)
+                                            parsed_rules.extend(expanded)
+                                else:
+                                    expanded = TransformationRegistry.process_rule(sanitized_rule)
+                                    parsed_rules.extend(expanded)
+
                     parsed_stages.append({"type": "rules", "data": parsed_rules})
 
         else:
@@ -83,8 +103,26 @@ class TransformationParser:
                 for rule_item in raw_rules:
                     if isinstance(rule_item, dict):
                         sanitized_rule = cls._sanitize_dict(rule_item)
-                        expanded = TransformationRegistry.process_rule(sanitized_rule)
-                        parsed_rules.extend(expanded)
+                        
+                        # Intercept template injection
+                        if "inject_template" in sanitized_rule:
+                            template_cfg = sanitized_rule["inject_template"]
+                            template_name = template_cfg.get("name")
+                            with_vars = template_cfg.get("with", {})
+                            
+                            if template_name:
+                                contain_templates_from.add(template_name)
+                                injected_rules = TemplateManager.inject_handler(
+                                    template_name=template_name,
+                                    with_vars=with_vars
+                                )
+                                for inj_rule in injected_rules:
+                                    expanded = TransformationRegistry.process_rule(inj_rule)
+                                    parsed_rules.extend(expanded)
+                        else:
+                            expanded = TransformationRegistry.process_rule(sanitized_rule)
+                            parsed_rules.extend(expanded)
+
             if parsed_rules:
                 parsed_stages.append({"type": "rules", "data": parsed_rules})
 
@@ -98,6 +136,7 @@ class TransformationParser:
             "registered_aliases": sorted(list(set(registered_aliases))),
             "stages": parsed_stages,
             "ContainVarsFrom": clean_config.get("ContainVarsFrom", []),
+            "ContainTemplatesFrom": sorted(list(contain_templates_from)),
             "ContainFunctionsFrom": contained_functions,
         }
 
@@ -113,9 +152,6 @@ class TransformationParser:
         file_map: Dict[str, Dict[str, Any]],
         visited_refs: Set[str]
     ) -> Dict[str, Any]:
-        """
-        Recursively flattens dependencies linked through 'run_ref'.
-        """
         ref_key = current_config.get("run_ref")
         if not ref_key:
             return current_config
@@ -129,17 +165,14 @@ class TransformationParser:
         visited_refs.add(ref_key)
         target_raw = file_map[ref_key]
         
-        # Recursively resolve parent step if it also contains run_ref
         parent_resolved = cls._resolve_references(target_raw, file_map, visited_refs)
 
-        # Merge base table/alias parameters from parent if not declared locally
         merged_config = {
             "table": current_config.get("table") or parent_resolved.get("table"),
             "alias": current_config.get("alias") or parent_resolved.get("alias"),
             "stages": []
         }
 
-        # Prepend parent stages before current file stages
         parent_stages = parent_resolved.get("stages", [])
         current_stages = current_config.get("stages", [])
 
