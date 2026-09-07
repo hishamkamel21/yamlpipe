@@ -1,5 +1,3 @@
-# yamlpipe/core/template_manager.py
-
 import copy
 import logging
 from typing import Any, Dict, List
@@ -26,12 +24,12 @@ class TemplateManager:
             if not raw_template_data:
                 raise ValueError(f"Template '{template_name}' was empty or not found.")
 
-            # Extract list from 'rules', 'columns_checks', 'template', or root list
+            # Extract list from 'rules', 'columns_checks', 'template', or 'checks'
             template_items = None
             if isinstance(raw_template_data, dict):
                 template_items = (
-                    raw_template_data.get("rules")
-                    or raw_template_data.get("columns_checks")
+                    raw_template_data.get("columns_checks")
+                    or raw_template_data.get("rules")
                     or raw_template_data.get("template")
                     or raw_template_data.get("checks")
                 )
@@ -41,7 +39,7 @@ class TemplateManager:
             if not isinstance(template_items, list):
                 raise ValueError(
                     f"Invalid template format for '{template_name}'. "
-                    f"Expected a list under 'rules', 'columns_checks', or 'template'."
+                    f"Expected a list under 'columns_checks', 'rules', or 'template'."
                 )
 
             expanded_rules: List[Dict[str, Any]] = []
@@ -93,6 +91,10 @@ class TemplateManager:
             return [cls._resolve_all_set_vars_and_vars(item, with_vars) for item in obj]
 
         elif isinstance(obj, str):
+            # Resolve variable syntax ${var.path.to.val} from VariablesManager
+            if VariablesManager.is_var(obj):
+                return VariablesManager.resolve_var(obj)
+
             for key, val in with_vars.items():
                 target_placeholder = f"${{{key}}}"
                 if obj == target_placeholder:
@@ -130,7 +132,6 @@ class TemplateManager:
             return [check_entry]
 
         for target_col in raw_targets:
-            # Skip empty column placeholders if empty lists are passed in with:
             if not target_col:
                 continue
 
