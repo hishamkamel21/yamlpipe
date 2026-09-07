@@ -3,7 +3,7 @@
 import copy
 import logging
 from typing import Any, Dict, List
-from yamlpipe.core.getter import Getter
+from yamlpipe.getter import Getter
 from yamlpipe.core.vars_manager import VariablesManager
 from yamlpipe.utility.placeholder_resolver import TemplateResolver
 
