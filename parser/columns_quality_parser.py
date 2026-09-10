@@ -1,11 +1,12 @@
 import logging
 from typing import Any, Dict, Generator, List, Set, Tuple
-from yamlpipe.core.template_manager import TemplateManager
 from yamlpipe.core.vars_manager import VariablesManager
 from yamlpipe.registry.columns_quality_registry import ColumnQualityRegistry
-from yamlpipe.utility.placeholder_resolver import TemplateResolver
+from yamlpipe.utility.placeholder_resolver import TemplateResolver 
+from yamlpipe.utility.logger import get_logger
 
-logger = logging.getLogger("ColumnQualityParser")
+
+logger = get_logger("ColumnQualityParser")
 
 
 class ColumnQualityParser:
@@ -24,43 +25,16 @@ class ColumnQualityParser:
             return {
                 "columns_checks": {"error_expr": [], "warn_expr": []},
                 "registered_error_suffixes": [],
-                "ContainCustomChecksFrom": [],
-                "ContainTemplatesFrom": []
+                "ContainCustomChecksFrom": []
             }
-
-        templates_used: Set[str] = set()
-        expanded_columns_checks: List[Dict[str, Any]] = []
-
-        # 1. Expand inject_template entries using TemplateManager
-        for col_entry in columns_checks_config:
-            if not isinstance(col_entry, dict):
-                continue
-
-            if "inject_template" in col_entry:
-                inject_info = col_entry["inject_template"]
-                template_name = inject_info.get("name")
-                raw_with_vars = inject_info.get("with", {})
-
-                if template_name:
-                    templates_used.add(template_name)
-
-                    resolved_checks = TemplateManager.inject_handler(
-                        template_name=template_name,
-                        with_vars=raw_with_vars
-                    )
-
-                    if isinstance(resolved_checks, list):
-                        expanded_columns_checks.extend(resolved_checks)
-            else:
-                expanded_columns_checks.append(col_entry)
 
         error_expressions: List[str] = []
         warn_expressions: List[str] = []
         registered_error_suffixes: Set[str] = set()
         custom_checks_used: Set[str] = set()
 
-        # 2. Parse all entries
-        for col_entry in expanded_columns_checks:
+        # Parse all entries directly without templating expansion
+        for col_entry in columns_checks_config:
             if not isinstance(col_entry, dict):
                 continue
 
@@ -104,8 +78,7 @@ class ColumnQualityParser:
                 "warn_expr": warn_expressions
             },
             "registered_error_suffixes": sorted(list(registered_error_suffixes)),
-            "ContainCustomChecksFrom": sorted(list(custom_checks_used)),
-            "ContainTemplatesFrom": sorted(list(templates_used))
+            "ContainCustomChecksFrom": sorted(list(custom_checks_used))
         }
 
     @classmethod

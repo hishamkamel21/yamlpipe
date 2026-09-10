@@ -3,8 +3,10 @@ from typing import Any, Dict, Set
 from yamlpipe.parser.columns_quality_parser import ColumnQualityParser
 from yamlpipe.parser.schema_checks_parser import SchemaQualityParser
 from yamlpipe.parser.table_quality_parser import TableQualityParser
+from yamlpipe.utility.logger import get_logger
 
-logger = logging.getLogger("QualityChecksParser")
+
+logger = get_logger("QualityChecksParser")
 
 
 class QualityChecksParser:

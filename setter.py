@@ -20,7 +20,6 @@ def set_project(project_dir: str = ".") -> str:
             os.path.join(target_dir, "functions"),
             os.path.join(target_dir, "pipeline"),
             os.path.join(target_dir, "vars"),
-            os.path.join(target_dir, "templates"),  # Root-level ONLY
             os.path.join(target_dir, "yaml_configs", "transformation_rules"),
             os.path.join(target_dir, "yaml_configs", "quality_gate"),
             # Dynamic Compilation Cache Folders

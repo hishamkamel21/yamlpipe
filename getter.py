@@ -35,11 +35,3 @@ class Getter:
         clean_selector = selector.rsplit(".", 1)[0] if selector.endswith((".yaml", ".yml")) else selector
 
         return CacheManager.get_or_compile(project_root=project_root, subfolder="vars", selector=clean_selector)
-
-    @classmethod
-    def get_templates(cls, selector: str, project_dir: Optional[str] = None) -> Dict[str, Any]:
-        """Loads compiled/cached template configuration as parsed JSON dict from root templates directory."""
-        project_root = Helper.find_project_root(explicit_project_dir=project_dir)
-        clean_selector = selector.rsplit(".", 1)[0] if selector.endswith((".yaml", ".yml")) else selector
-
-        return CacheManager.get_or_compile(project_root=project_root, subfolder="templates", selector=clean_selector)

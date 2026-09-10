@@ -4,9 +4,11 @@ from typing import Dict, Any, List, Set, Tuple
 from pyspark.sql import DataFrame
 import pyspark.sql.functions as F
 
-from yamlpipe.utility.helper import Helper
+from yamlpipe.utility.helper import Helper 
+from yamlpipe.utility.logger import get_logger
 
-logger = logging.getLogger("TransformationManager")
+
+logger = get_logger("TransformationManager")
 
 
 class TransformationManager:
