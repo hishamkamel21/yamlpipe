@@ -41,8 +41,9 @@ class TableQualityRegistry:
     @classmethod
     def build_lookup_expr(cls, check: Dict[str, Any], ref_view: str) -> Tuple[str, bool, bool]:
         """
-        Builds SQL expressions for table lookup validation and attribute enrichment.
-        Supports both simple existence checks (EXISTS) and value retrieval (Scalar Subquery / STRUCT).
+        Builds lookup expressions. 
+        Note: If 'select' is provided, perform a LEFT JOIN against `ref_view` 
+        in your main pipeline builder, or use simple scalar column references.
         """
         source_key = check.get("key") or check.get("column")
         if not source_key:
@@ -74,7 +75,8 @@ class TableQualityRegistry:
         raw_select = ref_meta.get("select") or check.get("select")
 
         # ---------------------------------------------------------------------
-        # CASE A: User requested column enrichment via 'select'
+        # Case A: User supplied 'select' columns -> Avoid Correlated Subqueries
+        # Assume ref_view is joined externally as LEFT JOIN ref_view AS ref_tbl
         # ---------------------------------------------------------------------
         if raw_select:
             select_cols = [
@@ -83,38 +85,19 @@ class TableQualityRegistry:
                 if c.strip()
             ]
 
-            struct_fields = ", ".join([
-                f"`ref_tbl`.`{col}`" if " " not in col and "(" not in col else col 
+            # Build direct column aliases assuming LEFT JOIN is applied
+            projections = [
+                f"`ref_tbl`.`{col}` AS `{col}`" if " " not in col and "(" not in col else f"{col} AS `{col}`"
                 for col in select_cols
-            ])
-
-            # Correlated scalar subquery building a STRUCT of selected fields
-            lookup_subquery = f"""(
-                SELECT {broadcast_hint} STRUCT({struct_fields})
-                FROM `{ref_view}` AS `ref_tbl`
-                WHERE {target_expr} = {source_expr} {filter_sql}
-                LIMIT 1
-            )"""
-
-            # Build expression projecting structural fields and computing invalid flag
-            field_projections = [
-                f"`_lookup_struct`.`{col}` AS `{col}`" for col in select_cols
             ]
-            validation_flag = f"CASE WHEN `_lookup_struct` IS NULL THEN 1 ELSE 0 END AS `{output_col}`"
-
-            expr = f"""
-                WITH `_lookup_struct` AS {lookup_subquery}
-                SELECT {', '.join(field_projections)}, {validation_flag}
-            """.strip()
-
-            # Simplified single inline projection expression for pipeline generators
-            select_projections = ", ".join([
-                f"{lookup_subquery}.`{col}` AS `{col}`" for col in select_cols
-            ])
-            expr = f"{select_projections}, (CASE WHEN {lookup_subquery} IS NULL THEN 1 ELSE 0 END) AS `{output_col}`"
+            
+            # Check validity based on target key join matching
+            validation_flag = f"CASE WHEN {target_expr} IS NULL THEN 1 ELSE 0 END AS `{output_col}`"
+            
+            expr = ", ".join(projections + [validation_flag])
 
         # ---------------------------------------------------------------------
-        # CASE B: Standard Existence Check (No extra columns selected)
+        # Case B: Validation only (No extra attributes requested)
         # ---------------------------------------------------------------------
         else:
             expr = f"""(CASE WHEN EXISTS (
