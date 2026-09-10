@@ -1,83 +1,105 @@
 import logging
 import os
 import sys
+import yaml
 from typing import Optional
 
-# Global cache for initialized loggers to avoid redundant handler setup
-_INITIALIZED_LOGGERS = set()
 _LOG_FILE_PATH: Optional[str] = None
 
 
-def _auto_find_project_root() -> str:
+def find_project_root(explicit_project_dir: Optional[str] = None) -> str:
     """
-    Dynamically locates project root using CWD or upward hierarchy to find project.yml.
-    Defaults to current working directory (CWD) if project.yml is not found.
+    Dynamically locates the active project directory root by searching for project.yml.
     """
     cwd = os.path.abspath(os.getcwd())
-    current_dir = cwd
 
+    # 1. Explicit directory argument
+    if explicit_project_dir:
+        resolved_path = (
+            explicit_project_dir
+            if os.path.isabs(explicit_project_dir)
+            else os.path.abspath(os.path.join(cwd, explicit_project_dir))
+        )
+        if os.path.exists(os.path.join(resolved_path, "project.yml")) or os.path.exists(resolved_path):
+            return resolved_path
+
+    # 2. Search upward in directory hierarchy for project.yml
+    current_dir = cwd
     while True:
         candidate_config = os.path.join(current_dir, "project.yml")
         if os.path.exists(candidate_config):
-            return current_dir
+            try:
+                with open(candidate_config, "r", encoding="utf-8") as f:
+                    config = yaml.safe_load(f)
+                    return config.get("project", {}).get("project_dir", current_dir)
+            except Exception:
+                return current_dir
 
         parent_dir = os.path.dirname(current_dir)
-        if parent_dir == current_dir:  # Reached filesystem root
+        if parent_dir == current_dir:  # Filesystem root reached
             break
         current_dir = parent_dir
 
+    # 3. Check direct subdirectories for project.yml
+    try:
+        subdirs = [
+            os.path.join(cwd, d)
+            for d in os.listdir(cwd)
+            if os.path.isdir(os.path.join(cwd, d)) and not d.startswith((".", "_"))
+        ]
+        projects_found = [d for d in subdirs if os.path.exists(os.path.join(d, "project.yml"))]
+        if len(projects_found) == 1:
+            return projects_found[0]
+    except Exception:
+        pass
+
+    # 4. Default fallback to CWD
     return cwd
 
 
-def _configure_logger(logger: logging.Logger) -> None:
+def _setup_root_logger() -> str:
     """
-    Attaches StreamHandler (Console) and FileHandler (pipe.log) automatically.
-    Appends logs if pipe.log exists, or creates it automatically if missing.
+    Configures the root logger automatically to write to console AND <project_root>/pipe.log.
+    Creates pipe.log if it doesn't exist, or appends to it if found.
     """
     global _LOG_FILE_PATH
 
-    # Detect project root dynamically
-    project_root = _auto_find_project_root()
+    project_root = find_project_root()
     log_file_path = os.path.join(project_root, "pipe.log")
     _LOG_FILE_PATH = log_file_path
-
-    # Ensure directory exists
-    os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
 
     formatter = logging.Formatter(
         fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
 
-    # Clear pre-existing handlers to prevent duplicate outputs
-    if logger.hasHandlers():
-        logger.handlers.clear()
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
 
-    # 1. Console Output Handler (stdout)
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    console_handler.setLevel(logging.INFO)
-    logger.addHandler(console_handler)
+    # Prevent duplicate handlers
+    if not root_logger.handlers:
+        # 1. Console Output (stdout)
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(formatter)
+        console_handler.setLevel(logging.INFO)
+        root_logger.addHandler(console_handler)
 
-    # 2. File Output Handler (pipe.log in project root)
-    # mode="a" ensures it creates pipe.log if missing or appends if found
-    file_handler = logging.FileHandler(log_file_path, mode="a", encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    file_handler.setLevel(logging.INFO)
-    logger.addHandler(file_handler)
+        # 2. File Output (pipe.log)
+        # mode="a" automatically creates file if missing or appends if present
+        file_handler = logging.FileHandler(log_file_path, mode="a", encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        file_handler.setLevel(logging.INFO)
+        root_logger.addHandler(file_handler)
 
-    logger.setLevel(logging.INFO)
+    return log_file_path
+
+
+# Initialize root logger automatically when logger module is imported
+_setup_root_logger()
 
 
 def get_logger(name: str) -> logging.Logger:
     """
-    Returns a configured Logger instance. Automatically attaches pipe.log FileHandler
-    on first access. No manual setup or initialization required.
+    Returns a child logger inheriting the automatic console + pipe.log output.
     """
-    logger = logging.getLogger(name)
-
-    if name not in _INITIALIZED_LOGGERS:
-        _configure_logger(logger)
-        _INITIALIZED_LOGGERS.add(name)
-
-    return logger
+    return logging.getLogger(name)
