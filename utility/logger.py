@@ -1,45 +1,49 @@
 import logging
+import os
 import sys
-from pathlib import Path
+from typing import Optional
 
-# Path to log file (saved in project root directory)
-LOG_FILE_PATH = Path(__file__).resolve().parent.parent / "pipe.log"
+# Global variable to track log file path
+_LOG_FILE_PATH: Optional[str] = None
 
 
-def setup_logger(name: str = "yamlpipe") -> logging.Logger:
-    """Configures and returns a thread-safe logger with console and file output."""
-    logger = logging.getLogger(name)
+def setup_logger(project_dir: str = ".") -> None:
+    """Configures the root/library logger to write to console and <project_dir>/pipe.log."""
+    global _LOG_FILE_PATH
 
-    # Avoid adding duplicate handlers if logger is imported multiple times
-    if logger.hasHandlers():
-        return logger
+    target_dir = os.path.abspath(project_dir)
+    os.makedirs(target_dir, exist_ok=True)
 
-    logger.setLevel(logging.INFO)
+    log_file = os.path.join(target_dir, "pipe.log")
+    _LOG_FILE_PATH = log_file
 
-    # Log Formatter
-    log_format = logging.Formatter(
-        fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+    # Define log message format
+    formatter = logging.Formatter(
+        fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
     )
 
-    # 1. File Handler (Writes to pipe.log)
-    file_handler = logging.FileHandler(LOG_FILE_PATH, mode="a", encoding="utf-8")
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(log_format)
+    # Get root logger or module-specific parent logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
 
-    # 2. Console Handler (Standard Output)
+    # Clear existing handlers to prevent duplicate log outputs
+    if root_logger.hasHandlers():
+        root_logger.handlers.clear()
+
+    # 1. Console Handler (stdout)
     console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
     console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(log_format)
+    root_logger.addHandler(console_handler)
 
-    # Attach handlers
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
+    # 2. File Handler (pipe.log in project root)
+    file_handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
 
-    return logger
 
-
-def get_logger(module_name: str) -> logging.Logger:
-    """Helper function to get a named logger for specific modules."""
-    setup_logger()  # Ensure root/base logger is initialized
-    return logging.getLogger(f"{module_name}") 
+def get_logger(name: str) -> logging.Logger:
+    """Returns a named logger instance inheriting project log configurations."""
+    return logging.getLogger(name)

@@ -6,8 +6,10 @@ from pyspark.storagelevel import StorageLevel
 
 from yamlpipe.registry.schema_checks_registry import SchemaQualityRegistry
 from yamlpipe.core.monitor_manager import MonitorManager
-from yamlpipe.utility.helper import Helper 
+from yamlpipe.utility.helper import Helper
+from yamlpipe.utility.logger import get_logger
 
+logger = get_logger("QualityManager")
 
 
 class QualityManager:
@@ -20,12 +22,14 @@ class QualityManager:
         :param df: Input PySpark DataFrame to run quality rules against.
         """
         if not isinstance(parsed_config, dict):
+            logger.error("[QualityManager Init Error] 'parsed_config' must be a dict.")
             raise TypeError(
                 f"[QualityManager Init Error] 'parsed_config' must be a dictionary, "
                 f"got '{type(parsed_config).__name__}'."
             )
 
         if not isinstance(df, DataFrame):
+            logger.error("[QualityManager Init Error] 'df' must be a valid PySpark DataFrame.")
             raise TypeError(
                 f"[QualityManager Init Error] 'df' must be a valid PySpark DataFrame, "
                 f"got '{type(df).__name__}'."
@@ -41,6 +45,7 @@ class QualityManager:
             or "unknown_table"
         )
         self.table_name = Helper.parse_table_name(raw_table_identifier)
+        logger.info(f"Initialized QualityManager for table: '{self.table_name}'")
 
         # Extract structured layers directly from QualityChecksParser output
         self.schema_checks = parsed_config.get("schema_checks", [])
@@ -57,6 +62,8 @@ class QualityManager:
             "table_checks_exist": bool(self.table_checks.get("checks")),
         }
 
+        logger.debug(f"Check execution summary for '{self.table_name}': {self.check_summary}")
+
         # Internal state tracking
         self.flags = []
         self.final_df = None
@@ -72,15 +79,18 @@ class QualityManager:
         """
         Main Execution Engine. Runs Schema, Column, and Table quality rules against the DataFrame.
         """
+        logger.info(f"Applying quality checks on table '{self.table_name}' (batch_id: {batch_id}, action: {action})")
         current_df = self.df
 
         # ---------------------------------------------------------------------
         # 1. Apply Schema-Level Checks
         # ---------------------------------------------------------------------
         if self.schema_checks:
+            logger.info("Executing Schema-Level Quality Checks...")
             try:
                 current_df = SchemaQualityRegistry.apply_schema_checks(current_df, self.schema_checks)
             except Exception as e:
+                logger.error(f"Schema Quality evaluation failed for '{self.table_name}': {str(e)}", exc_info=True)
                 raise RuntimeError(f"Schema Quality evaluation failed: {str(e)}") from e
 
         # ---------------------------------------------------------------------
@@ -89,8 +99,13 @@ class QualityManager:
         error_exprs = self.columns_checks.get("error_expr", [])
         warning_exprs = self.columns_checks.get("warn_expr", [])
 
+        if error_exprs or warning_exprs:
+            logger.info(
+                f"Executing Column-Level Quality Checks... "
+                f"(Errors: {len(error_exprs)}, Warnings: {len(warning_exprs)})"
+            )
+
         try:
-            # استخدام array_except لإنشاء مصفوفة فارغة ARRAY<STRING> ناتجة عن [] وليس NULL
             empty_array_sql = "array_except(array(cast(null as string)), array(cast(null as string)))"
 
             if error_exprs:
@@ -109,6 +124,7 @@ class QualityManager:
                 .withColumn("Warnings", expr(warnings_sql))
             )
         except Exception as e:
+            logger.error(f"Column Quality evaluation failed for '{self.table_name}': {str(e)}", exc_info=True)
             raise RuntimeError(
                 f"Column Quality evaluation failed. Check SQL expressions. Error: {str(e)}"
             ) from e
@@ -120,6 +136,7 @@ class QualityManager:
         temp_views = self.table_checks.get("temp_views_to_create", [])
 
         if checks_list:
+            logger.info(f"Executing {len(checks_list)} Table-Level Quality Checks...")
             spark = current_df.sparkSession
 
             for view_meta in temp_views:
@@ -131,20 +148,23 @@ class QualityManager:
                 if view_name:
                     if raw_ref_table:
                         cleaned_ref_table = Helper.parse_table_name(raw_ref_table)
+                        logger.info(f"Creating temporary view '{view_name}' from table '{cleaned_ref_table}'")
                         spark.read.table(cleaned_ref_table).createOrReplaceTempView(view_name)
                     elif path:
+                        logger.info(f"Creating temporary view '{view_name}' from path '{path}' ({fmt})")
                         spark.read.format(fmt).load(path).createOrReplaceTempView(view_name)
 
             current_df.createOrReplaceTempView("tmp_src")
 
-            # Extract combined SQL expression and register flags from structured item list
             table_expr_str = ", ".join([chk["expr"] for chk in checks_list if chk.get("expr")])
             self._register_table_flags_from_checks(checks_list)
 
             try:
                 sql_query = f"SELECT *, {table_expr_str} FROM tmp_src"
+                logger.debug(f"Running Table Check SQL Query:\n{sql_query}")
                 current_df = spark.sql(sql_query)
             except Exception as e:
+                logger.error(f"Table Quality evaluation failed for '{self.table_name}': {str(e)}", exc_info=True)
                 raise RuntimeError(f"Table Quality evaluation failed: {str(e)}") from e
 
         self.final_df = current_df
@@ -155,20 +175,24 @@ class QualityManager:
         if persist_df:
             try:
                 if not self.final_df.is_cached:
+                    logger.info(f"Persisting evaluated DataFrame using storage level: {storage_level}")
                     self.final_df.persist(storage_level)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to persist DataFrame: {str(e)}")
 
         # ---------------------------------------------------------------------
         # 5. Route Output DataFrames & Parse Metrics
         # ---------------------------------------------------------------------
         if action.lower() == "keep":
+            logger.info("Routing data action: KEEP (Returning full DataFrame)")
             data_outputs = (self.final_df,)
         else:
+            logger.info("Routing data action: SPLIT (Splitting into valid & invalid DataFrames)")
             valid_df, invalid_df = self.split_df(df=self.final_df)
             data_outputs = (valid_df, invalid_df)
 
         if show_monitor_metrics:
+            logger.info("Generating monitor metrics...")
             metrics_outputs = self._generate_and_parse_metrics(batch_id=batch_id)
             return data_outputs + tuple(metrics_outputs)
 
@@ -176,8 +200,7 @@ class QualityManager:
 
     def _generate_and_parse_metrics(self, batch_id: Any = None) -> List[DataFrame]:
         """
-        Private Helper: Calls MonitorManager and dynamically extracts metrics DataFrames
-        in a strict order depending on check_summary state.
+        Private Helper: Calls MonitorManager and dynamically extracts metrics DataFrames.
         """
         metrics_dict = MonitorManager.generate_metrics(
             df=self.final_df,
@@ -190,14 +213,12 @@ class QualityManager:
 
         extracted_metrics = []
 
-        # 1. Schema Check Metrics
         if self.check_summary.get("schema_checks_exist", False):
             if "schema_summary" in metrics_dict:
                 extracted_metrics.append(metrics_dict["schema_summary"])
             if "schema_monitor_details" in metrics_dict:
                 extracted_metrics.append(metrics_dict["schema_monitor_details"])
 
-        # 2. Data Summary Metrics
         has_active_flags = len(self.flags) > 0
         requires_data_scan = (
             self.check_summary.get("columns_checks_exist", False)
@@ -208,11 +229,9 @@ class QualityManager:
         if requires_data_scan and "data_monitor_summary" in metrics_dict:
             extracted_metrics.append(metrics_dict["data_monitor_summary"])
 
-        # 3. Column-Level Metrics
         if self.check_summary.get("columns_checks_exist", False) and "per_column_metrics" in metrics_dict:
             extracted_metrics.append(metrics_dict["per_column_metrics"])
 
-        # 4. Error-Type Metrics
         has_error_type_scope = (
             self.check_summary.get("table_checks_exist", False)
             or self.check_summary.get("columns_checks_exist", False)
@@ -220,6 +239,7 @@ class QualityManager:
         if has_error_type_scope and "per_error_type_metrics" in metrics_dict:
             extracted_metrics.append(metrics_dict["per_error_type_metrics"])
 
+        logger.info(f"Extracted {len(extracted_metrics)} metrics DataFrames successfully.")
         return extracted_metrics
 
     def _register_table_flags_from_checks(self, checks_list: List[Dict[str, Any]]):
@@ -237,6 +257,7 @@ class QualityManager:
                     "on_split_keep": check.get("on_split_keep", False),
                     "is_freshness": check.get("is_freshness", False)
                 })
+                logger.debug(f"Registered table flag: '{flag_name}'")
 
     def split_df(self, df: DataFrame) -> Tuple[DataFrame, DataFrame]:
         """
@@ -255,12 +276,16 @@ class QualityManager:
             valid_expr = " AND ".join(valid_conditions)
             invalid_expr = " OR ".join(invalid_conditions)
 
+            logger.debug(f"Valid Filter Expr: {valid_expr}")
+            logger.debug(f"Invalid Filter Expr: {invalid_expr}")
+
             valid_df = df.filter(valid_expr)
             invalid_df = df.filter(invalid_expr)
 
             return valid_df, invalid_df
 
         except Exception as e:
+            logger.error(f"DataFrame split operation failed for '{self.table_name}': {str(e)}", exc_info=True)
             raise RuntimeError(f"DataFrame split operation failed: {str(e)}") from e
 
     def unpersist(self):
@@ -270,5 +295,6 @@ class QualityManager:
         try:
             if self.final_df is not None and self.final_df.is_cached:
                 self.final_df.unpersist()
-        except Exception:
-            pass
+                logger.info(f"Unpersisted evaluated DataFrame for '{self.table_name}'")
+        except Exception as e:
+            logger.warning(f"Unpersist warning: {str(e)}")
