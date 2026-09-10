@@ -41,15 +41,14 @@ class TableQualityRegistry:
     @classmethod
     def build_lookup_expr(cls, check: Dict[str, Any], ref_view: str) -> Tuple[str, bool, bool]:
         """
-        Builds a correlated subquery SQL expression for table lookup validation with optional broadcast hint.
+        Builds SQL expressions for table lookup validation and attribute enrichment.
+        Supports both simple existence checks (EXISTS) and value retrieval (Scalar Subquery / STRUCT).
         """
         source_key = check.get("key") or check.get("column")
         if not source_key:
             raise ValueError(f"[Lookup Error] Missing 'key' or 'column' specification in config: {check}")
 
         ref_meta = check.get("ref", {}) if isinstance(check.get("ref"), dict) else {}
-        
-        # Target lookup key defaults to source key if not specified
         target_key = ref_meta.get("key") or check.get("target_key") or source_key
         
         output_col = (
@@ -63,25 +62,66 @@ class TableQualityRegistry:
         cleaned_source_key = Helper.clean_multiline_sql(str(source_key))
         cleaned_target_key = Helper.clean_multiline_sql(str(target_key))
 
-        # Check broadcast flag (defaults to True for lookup tables)
         should_broadcast = ref_meta.get("broadcast", check.get("broadcast", True))
         broadcast_hint = "/*+ BROADCAST(ref_tbl) */" if should_broadcast else ""
 
-        # Filter string support inside lookup reference
         filter_str = ref_meta.get("filter") or check.get("filter")
-        filter_sql = ""
-        if filter_str:
-            filter_sql = f"AND ({Helper.clean_multiline_sql(str(filter_str))})"
+        filter_sql = f"AND ({Helper.clean_multiline_sql(str(filter_str))})" if filter_str else ""
 
-        # If key is a column name (no space/parens), format as ref_tbl.`col`, otherwise raw expression
         target_expr = f"`ref_tbl`.`{cleaned_target_key}`" if " " not in cleaned_target_key and "(" not in cleaned_target_key else cleaned_target_key
         source_expr = f"`tmp_src`.`{cleaned_source_key}`" if " " not in cleaned_source_key and "(" not in cleaned_source_key else cleaned_source_key
 
-        expr = f"""(CASE WHEN EXISTS (
-            SELECT {broadcast_hint} 1 
-            FROM `{ref_view}` AS `ref_tbl` 
-            WHERE {target_expr} = {source_expr} {filter_sql}
-        ) THEN 0 ELSE 1 END) AS `{output_col}`""".strip()
+        raw_select = ref_meta.get("select") or check.get("select")
+
+        # ---------------------------------------------------------------------
+        # CASE A: User requested column enrichment via 'select'
+        # ---------------------------------------------------------------------
+        if raw_select:
+            select_cols = [
+                Helper.clean_multiline_sql(c.strip()) 
+                for c in str(raw_select).replace("\n", ",").split(",") 
+                if c.strip()
+            ]
+
+            struct_fields = ", ".join([
+                f"`ref_tbl`.`{col}`" if " " not in col and "(" not in col else col 
+                for col in select_cols
+            ])
+
+            # Correlated scalar subquery building a STRUCT of selected fields
+            lookup_subquery = f"""(
+                SELECT {broadcast_hint} STRUCT({struct_fields})
+                FROM `{ref_view}` AS `ref_tbl`
+                WHERE {target_expr} = {source_expr} {filter_sql}
+                LIMIT 1
+            )"""
+
+            # Build expression projecting structural fields and computing invalid flag
+            field_projections = [
+                f"`_lookup_struct`.`{col}` AS `{col}`" for col in select_cols
+            ]
+            validation_flag = f"CASE WHEN `_lookup_struct` IS NULL THEN 1 ELSE 0 END AS `{output_col}`"
+
+            expr = f"""
+                WITH `_lookup_struct` AS {lookup_subquery}
+                SELECT {', '.join(field_projections)}, {validation_flag}
+            """.strip()
+
+            # Simplified single inline projection expression for pipeline generators
+            select_projections = ", ".join([
+                f"{lookup_subquery}.`{col}` AS `{col}`" for col in select_cols
+            ])
+            expr = f"{select_projections}, (CASE WHEN {lookup_subquery} IS NULL THEN 1 ELSE 0 END) AS `{output_col}`"
+
+        # ---------------------------------------------------------------------
+        # CASE B: Standard Existence Check (No extra columns selected)
+        # ---------------------------------------------------------------------
+        else:
+            expr = f"""(CASE WHEN EXISTS (
+                SELECT {broadcast_hint} 1 
+                FROM `{ref_view}` AS `ref_tbl` 
+                WHERE {target_expr} = {source_expr} {filter_sql}
+            ) THEN 0 ELSE 1 END) AS `{output_col}`""".strip()
 
         on_split_keep = check.get("on_split_keep", False)
         is_freshness = False
@@ -114,9 +154,7 @@ class TableQualityRegistry:
         cleaned_ref_key = Helper.clean_multiline_sql(str(ref_key))
 
         filter_str = ref_cfg.get("filter") or check.get("filter")
-        filter_sql = ""
-        if filter_str:
-            filter_sql = f"AND ({Helper.clean_multiline_sql(str(filter_str))})"
+        filter_sql = f"AND ({Helper.clean_multiline_sql(str(filter_str))})" if filter_str else ""
 
         should_broadcast = ref_cfg.get("broadcast", check.get("broadcast", True))
         broadcast_hint = "/*+ BROADCAST(r) */" if should_broadcast else ""

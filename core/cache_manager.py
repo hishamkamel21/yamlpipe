@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Union
 from filelock import FileLock, Timeout
 from yamlpipe.utility.logger import get_logger
 
-logger = get_logger("CacheManager")
+logger = get_logger("[ CacheManager ]")
 
 
 class ReentrantFileLock:
