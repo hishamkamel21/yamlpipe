@@ -123,7 +123,7 @@ class QualityManager:
             ) from e
 
         # ---------------------------------------------------------------------
-        # 3. Apply Table-Level Checks
+        # 3. Apply Table-Level Checks (Updated to handle LEFT JOINs & Windowing Safely)
         # ---------------------------------------------------------------------
         checks_list = self.table_checks.get("checks", [])
         temp_views = self.table_checks.get("temp_views_to_create", [])
@@ -132,6 +132,8 @@ class QualityManager:
             logger.info(f"Executing {len(checks_list)} Table-Level Quality Checks...")
             spark = current_df.sparkSession
 
+            # إنشاء الـ Temp Views المرجعية لجدول الـ Lookups
+            join_clauses = []
             for view_meta in temp_views:
                 view_name = view_meta.get("view_name")
                 raw_ref_table = view_meta.get("table")
@@ -155,13 +157,24 @@ class QualityManager:
 
                     ref_df.createOrReplaceTempView(view_name)
 
+                    # إذا كان الـ check يحتوي على مفاتيح للـ JOIN المباشر
+                    join_key = view_meta.get("join_key")
+                    source_key = view_meta.get("source_key", join_key)
+                    if join_key and source_key:
+                        join_clauses.append(
+                            f"LEFT JOIN `{view_name}` AS `ref_tbl` ON `tmp_src`.`{source_key}` = `ref_tbl`.`{join_key}`"
+                        )
+
             current_df.createOrReplaceTempView("tmp_src")
 
             table_expr_str = ", ".join([chk["expr"] for chk in checks_list if chk.get("expr")])
             self._register_table_flags_from_checks(checks_list)
 
             try:
-                sql_query = f"SELECT *, {table_expr_str} FROM tmp_src"
+                # تجميع الـ joins الممكنة إن وجدت لتفادي Subqueries داخل الـ SELECT
+                joins_sql = " ".join(join_clauses) if join_clauses else ""
+                sql_query = f"SELECT tmp_src.*, {table_expr_str} FROM tmp_src {joins_sql}".strip()
+                
                 logger.debug(f"Running Table Check SQL Query:\n{sql_query}")
                 current_df = spark.sql(sql_query)
             except Exception as e:
@@ -249,10 +262,11 @@ class QualityManager:
         """
         for check in checks_list:
             expr_str = check.get("expr", "").strip()
-            match = re.search(r"AS\s+[`]?([a-zA-Z0-9_]+)[`]?$", expr_str, re.IGNORECASE)
+            # استخراج أحدث اسم لـ Alias حتى مع وجود تعبيرات متعددة مفصولة بـ فاصلة
+            matches = re.findall(r"AS\s+[`]?([a-zA-Z0-9_]+)[`]?$", expr_str, re.IGNORECASE)
             
-            if match:
-                flag_name = match.group(1)
+            if matches:
+                flag_name = matches[-1]
                 self.flags.append({
                     "flag_name": flag_name,
                     "on_split_keep": check.get("on_split_keep", False),
