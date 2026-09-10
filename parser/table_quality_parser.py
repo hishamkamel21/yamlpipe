@@ -41,7 +41,6 @@ class TableQualityParser:
 
                 parsed_table = None
                 if table_cfg:
-                    # تحويل الكائن (dict) إلى اسم جدول كامل بالشكل catalog.schema.table
                     parsed_table = Helper.parse_table_name(table_cfg)
 
                 if not parsed_table and not path_source:

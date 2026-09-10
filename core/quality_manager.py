@@ -17,9 +17,6 @@ class QualityManager:
     def __init__(self, parsed_config: Dict[str, Any], df: DataFrame):
         """
         Initializes QualityManager with parsed quality checks configuration and target DataFrame.
-
-        :param parsed_config: Dictionary output from QualityChecksParser.
-        :param df: Input PySpark DataFrame to run quality rules against.
         """
         if not isinstance(parsed_config, dict):
             logger.error("[QualityManager Init Error] 'parsed_config' must be a dict.")
@@ -38,7 +35,6 @@ class QualityManager:
         self.parsed_config = parsed_config
         self.df = df
 
-        # Clean catalog.schema.table or path string into a unified table identifier
         raw_table_identifier = (
             parsed_config.get("table") 
             or parsed_config.get("table_name") 
@@ -47,13 +43,11 @@ class QualityManager:
         self.table_name = Helper.parse_table_name(raw_table_identifier)
         logger.info(f"Initialized QualityManager for table: '{self.table_name}'")
 
-        # Extract structured layers directly from QualityChecksParser output
         self.schema_checks = parsed_config.get("schema_checks", [])
         self.columns_checks = parsed_config.get("columns_checks", {"error_expr": [], "warn_expr": []})
         self.registered_error_suffixes = parsed_config.get("registered_error_suffixes", [])
         self.table_checks = parsed_config.get("table_checks", {"checks": [], "temp_views_to_create": []})
 
-        # Dynamic check availability summary
         self.check_summary = {
             "schema_checks_exist": bool(self.schema_checks),
             "columns_checks_exist": bool(
@@ -64,7 +58,6 @@ class QualityManager:
 
         logger.debug(f"Check execution summary for '{self.table_name}': {self.check_summary}")
 
-        # Internal state tracking
         self.flags = []
         self.final_df = None
 
@@ -144,15 +137,23 @@ class QualityManager:
                 raw_ref_table = view_meta.get("table")
                 path = view_meta.get("path")
                 fmt = view_meta.get("format", "delta")
+                filter_cond = view_meta.get("filter")
 
                 if view_name:
                     if raw_ref_table:
                         cleaned_ref_table = Helper.parse_table_name(raw_ref_table)
                         logger.info(f"Creating temporary view '{view_name}' from table '{cleaned_ref_table}'")
-                        spark.read.table(cleaned_ref_table).createOrReplaceTempView(view_name)
+                        ref_df = spark.read.table(cleaned_ref_table)
                     elif path:
                         logger.info(f"Creating temporary view '{view_name}' from path '{path}' ({fmt})")
-                        spark.read.format(fmt).load(path).createOrReplaceTempView(view_name)
+                        ref_df = spark.read.format(fmt).load(path)
+                    else:
+                        continue
+
+                    if filter_cond:
+                        ref_df = ref_df.filter(filter_cond)
+
+                    ref_df.createOrReplaceTempView(view_name)
 
             current_df.createOrReplaceTempView("tmp_src")
 
@@ -247,7 +248,7 @@ class QualityManager:
         Extracts column alias from each check expression and attaches metadata directly.
         """
         for check in checks_list:
-            expr_str = check.get("expr", "")
+            expr_str = check.get("expr", "").strip()
             match = re.search(r"AS\s+[`]?([a-zA-Z0-9_]+)[`]?$", expr_str, re.IGNORECASE)
             
             if match:

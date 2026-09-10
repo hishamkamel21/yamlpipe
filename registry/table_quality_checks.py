@@ -15,7 +15,7 @@ class TableQualityRegistry:
         if not raw_keys:
             raise ValueError(f"[Duplicate Check Error] Missing required 'keys'. Config: {check}")
 
-        partition_cols = ", ".join([Helper.clean_multiline_sql(k) for k in raw_keys])
+        partition_cols = ", ".join([Helper.clean_multiline_sql(str(k)) for k in raw_keys])
         
         orderby_expr = (
             check.get("orderby") 
@@ -40,52 +40,48 @@ class TableQualityRegistry:
     # -------------------------------------------------------------------------
     @classmethod
     def build_lookup_expr(cls, check: Dict[str, Any], ref_view: str) -> Tuple[str, bool, bool]:
-        ref_cfg = check.get("ref", {})
-        if isinstance(ref_cfg, str):
-            ref_cfg = {"table": ref_cfg}
+        """
+        Builds a correlated subquery SQL expression for table lookup validation with optional broadcast hint.
+        """
+        source_key = check.get("key") or check.get("column")
+        if not source_key:
+            raise ValueError(f"[Lookup Error] Missing 'key' or 'column' specification in config: {check}")
 
-        output_column = (
+        ref_meta = check.get("ref", {}) if isinstance(check.get("ref"), dict) else {}
+        
+        # Target lookup key defaults to source key if not specified
+        target_key = ref_meta.get("key") or check.get("target_key") or source_key
+        
+        output_col = (
             check.get("output_col") 
             or check.get("output_column") 
-            or ref_cfg.get("output_col")
-            or ref_cfg.get("output_column")
-            or "is_lookup_failed"
+            or ref_meta.get("output_col") 
+            or ref_meta.get("output_column") 
+            or "lookup_invalid"
         )
+        
+        cleaned_source_key = Helper.clean_multiline_sql(str(source_key))
+        cleaned_target_key = Helper.clean_multiline_sql(str(target_key))
 
-        src_col = check.get("column") or check.get("foreign_key")
-        raw_keys = check.get("keys") or check.get("join_keys") or ref_cfg.get("key") or ref_cfg.get("keys")
+        # Check broadcast flag (defaults to True for lookup tables)
+        should_broadcast = ref_meta.get("broadcast", check.get("broadcast", True))
+        broadcast_hint = "/*+ BROADCAST(ref_tbl) */" if should_broadcast else ""
 
-        join_conditions = []
-        if src_col and ref_cfg.get("key"):
-            cleaned_src = Helper.clean_multiline_sql(str(src_col))
-            cleaned_ref = Helper.clean_multiline_sql(str(ref_cfg["key"]))
-            join_conditions.append(f"tmp_src.`{cleaned_src}` = r.`{cleaned_ref}`")
-        elif raw_keys:
-            keys_list = [raw_keys] if isinstance(raw_keys, str) else raw_keys
-            for k in keys_list:
-                cleaned_k = Helper.clean_multiline_sql(str(k))
-                join_conditions.append(f"tmp_src.`{cleaned_k}` = r.`{cleaned_k}`")
-        elif src_col:
-            cleaned_src = Helper.clean_multiline_sql(str(src_col))
-            join_conditions.append(f"tmp_src.`{cleaned_src}` = r.`{cleaned_src}`")
-        else:
-            raise ValueError(f"[Lookup Check Error] Missing join keys or 'column' specification. Config: {check}")
-
-        join_clause = " AND ".join(join_conditions)
-
-        filter_str = check.get("filter") or ref_cfg.get("filter")
+        # Filter string support inside lookup reference
+        filter_str = ref_meta.get("filter") or check.get("filter")
         filter_sql = ""
         if filter_str:
             filter_sql = f"AND ({Helper.clean_multiline_sql(str(filter_str))})"
 
-        should_broadcast = check.get("broadcast", ref_cfg.get("broadcast", True))
-        broadcast_hint = "/*+ BROADCAST(r) */" if should_broadcast else ""
+        # If key is a column name (no space/parens), format as ref_tbl.`col`, otherwise raw expression
+        target_expr = f"`ref_tbl`.`{cleaned_target_key}`" if " " not in cleaned_target_key and "(" not in cleaned_target_key else cleaned_target_key
+        source_expr = f"`tmp_src`.`{cleaned_source_key}`" if " " not in cleaned_source_key and "(" not in cleaned_source_key else cleaned_source_key
 
-        expr = f"""CASE WHEN NOT EXISTS (
+        expr = f"""(CASE WHEN EXISTS (
             SELECT {broadcast_hint} 1 
-            FROM {ref_view} r 
-            WHERE {join_clause} {filter_sql}
-        ) THEN 1 ELSE 0 END AS `{output_column}`"""
+            FROM `{ref_view}` AS `ref_tbl` 
+            WHERE {target_expr} = {source_expr} {filter_sql}
+        ) THEN 0 ELSE 1 END) AS `{output_col}`""".strip()
 
         on_split_keep = check.get("on_split_keep", False)
         is_freshness = False
@@ -97,9 +93,9 @@ class TableQualityRegistry:
     # -------------------------------------------------------------------------
     @classmethod
     def build_foreign_key_expr(cls, check: Dict[str, Any], ref_view: str) -> Tuple[str, bool, bool]:
-        ref_cfg = check.get("ref", {})
-        if isinstance(ref_cfg, str):
-            ref_cfg = {"table": ref_cfg}
+        ref_cfg = check.get("ref", {}) if isinstance(check.get("ref"), dict) else {}
+        if isinstance(check.get("ref"), str):
+            ref_cfg = {"table": check.get("ref")}
 
         output_column = (
             check.get("output_col") 
@@ -109,7 +105,7 @@ class TableQualityRegistry:
             or "is_fk_violation"
         )
         
-        fk_col = check.get("foreign_key") or check.get("column")
+        fk_col = check.get("foreign_key") or check.get("column") or check.get("key")
         if not fk_col:
             raise ValueError(f"[Foreign Key Error] Missing 'foreign_key' specification in config: {check}")
 
@@ -125,16 +121,19 @@ class TableQualityRegistry:
         should_broadcast = ref_cfg.get("broadcast", check.get("broadcast", True))
         broadcast_hint = "/*+ BROADCAST(r) */" if should_broadcast else ""
 
+        fk_expr = f"tmp_src.`{cleaned_fk_col}`" if " " not in cleaned_fk_col and "(" not in cleaned_fk_col else cleaned_fk_col
+        ref_expr = f"r.`{cleaned_ref_key}`" if " " not in cleaned_ref_key and "(" not in cleaned_ref_key else cleaned_ref_key
+
         expr = f"""CASE 
-            WHEN tmp_src.`{cleaned_fk_col}` IS NOT NULL 
+            WHEN {fk_expr} IS NOT NULL 
                  AND NOT EXISTS (
                      SELECT {broadcast_hint} 1 
-                     FROM {ref_view} r 
-                     WHERE r.`{cleaned_ref_key}` = tmp_src.`{cleaned_fk_col}` {filter_sql}
+                     FROM `{ref_view}` r 
+                     WHERE {ref_expr} = {fk_expr} {filter_sql}
                  ) 
             THEN 1 
             ELSE 0 
-        END AS `{output_column}`"""
+        END AS `{output_column}`""".strip()
 
         on_split_keep = check.get("on_split_keep", False)
         is_freshness = False
@@ -163,7 +162,7 @@ class TableQualityRegistry:
         if unit == "max_timestamp":
             expr = f"MAX({ts_column_expr}) OVER () AS `{output_column}`"
         else:
-            ref_ts_sql = Helper.clean_multiline_sql(check["ref_timestamp"]) if check.get("ref_timestamp") else "CURRENT_TIMESTAMP()"
+            ref_ts_sql = Helper.clean_multiline_sql(str(check["ref_timestamp"])) if check.get("ref_timestamp") else "CURRENT_TIMESTAMP()"
 
             divisor = 1.0
             if unit == "hours":
