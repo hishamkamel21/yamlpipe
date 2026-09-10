@@ -9,7 +9,7 @@ from yamlpipe.core.monitor_manager import MonitorManager
 from yamlpipe.utility.helper import Helper
 from yamlpipe.utility.logger import get_logger
 
-logger = get_logger("QualityManager")
+logger = get_logger("[ QualityManager ]")
 
 
 class QualityManager:

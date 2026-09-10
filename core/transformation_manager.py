@@ -8,7 +8,7 @@ from yamlpipe.utility.helper import Helper
 from yamlpipe.utility.logger import get_logger
 
 
-logger = get_logger("TransformationManager")
+logger = get_logger("[ TransformationManager ]")
 
 
 class TransformationManager:
