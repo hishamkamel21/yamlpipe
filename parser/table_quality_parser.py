@@ -6,7 +6,7 @@ from yamlpipe.core.vars_manager import VariablesManager
 from yamlpipe.utility.helper import Helper
 from yamlpipe.utility.logger import get_logger
 
-logger = get_logger("[ TableQualityParser ]") 
+logger = get_logger("[ TableQualityParser ]")
 
 
 class TableQualityParser:
@@ -19,6 +19,7 @@ class TableQualityParser:
             logger.info("No 'table_checks' or 'checks' configuration found. Returning empty table check results.")
             return {
                 "table_checks": {
+                    "need_join_checks": [],
                     "checks": [],
                     "temp_views_to_create": []
                 }
@@ -27,6 +28,7 @@ class TableQualityParser:
         logger.info(f"Starting parsing for {len(checks)} table quality check entries...")
 
         parsed_checks: List[Dict[str, Any]] = []
+        need_join_checks: List[Dict[str, Any]] = []
         temp_views_to_create: List[Dict[str, Any]] = []
 
         for idx, check in enumerate(checks, start=1):
@@ -46,7 +48,12 @@ class TableQualityParser:
             try:
                 if check_type == "duplicate":
                     expr, on_split_keep, is_freshness = TableQualityRegistry.build_duplicate_expr(check)
-                    logger.debug(f"Successfully generated DUPLICATE check expression.")
+                    parsed_checks.append({
+                        "expr": expr,
+                        "on_split_keep": on_split_keep,
+                        "is_freshness": is_freshness
+                    })
+                    logger.debug("Successfully generated DUPLICATE check expression.")
 
                 elif check_type in ("lookup", "foreign_key"):
                     ref_view = f"tmp_ref_{uuid.uuid4().hex[:8]}"
@@ -77,28 +84,39 @@ class TableQualityParser:
                         "filter": ref_meta.get("filter") or check.get("filter")
                     }
                     temp_views_to_create.append(view_metadata)
-                    logger.debug(f"Registered temp view metadata for '{ref_view}': table='{parsed_table}', path='{path_source}'")
+                    logger.debug(f"Registered temp view metadata for '{ref_view}'")
+
+                    has_select = bool(ref_meta.get("select") or check.get("select"))
 
                     if check_type == "lookup":
-                        expr, on_split_keep, is_freshness = TableQualityRegistry.build_lookup_expr(check, ref_view)
+                        result = TableQualityRegistry.build_lookup_expr(check, ref_view, contain_select=has_select)
                     else:
-                        expr, on_split_keep, is_freshness = TableQualityRegistry.build_foreign_key_expr(check, ref_view)
+                        result = TableQualityRegistry.build_foreign_key_expr(check, ref_view, contain_select=has_select)
 
-                    logger.debug(f"Successfully generated {check_type.upper()} check expression.")
+                    if isinstance(result, dict):
+                        need_join_checks.append(result)
+                        logger.debug(f"Registered {check_type.upper()} check into 'need_join_checks'.")
+                    else:
+                        expr, on_split_keep, is_freshness = result
+                        parsed_checks.append({
+                            "expr": expr,
+                            "on_split_keep": on_split_keep,
+                            "is_freshness": is_freshness
+                        })
+                        logger.debug(f"Successfully generated standard {check_type.upper()} check expression.")
 
                 elif check_type == "freshness":
                     expr, on_split_keep, is_freshness = TableQualityRegistry.build_freshness_expr(check)
-                    logger.debug(f"Successfully generated FRESHNESS check expression.")
+                    parsed_checks.append({
+                        "expr": expr,
+                        "on_split_keep": on_split_keep,
+                        "is_freshness": is_freshness
+                    })
+                    logger.debug("Successfully generated FRESHNESS check expression.")
 
                 else:
                     logger.warning(f"Unrecognized or unsupported table check type '{check_type}'. Skipping entry.")
                     continue
-
-                parsed_checks.append({
-                    "expr": expr,
-                    "on_split_keep": on_split_keep,
-                    "is_freshness": is_freshness
-                })
 
             except Exception as e:
                 logger.error(
@@ -108,12 +126,13 @@ class TableQualityParser:
                 raise e
 
         logger.info(
-            f"Table quality checks parsing complete: {len(parsed_checks)} check expression(s) generated, "
-            f"{len(temp_views_to_create)} temp view(s) registered."
+            f"Table quality checks parsing complete: {len(parsed_checks)} standard check(s), "
+            f"{len(need_join_checks)} join check(s), {len(temp_views_to_create)} temp view(s) registered."
         )
 
         return {
             "table_checks": {
+                "need_join_checks": need_join_checks,
                 "checks": parsed_checks,
                 "temp_views_to_create": temp_views_to_create
             }

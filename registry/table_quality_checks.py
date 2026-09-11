@@ -1,4 +1,5 @@
-from typing import Dict, Any, Tuple
+import logging
+from typing import Dict, Any, Tuple, Union, Optional, List
 from yamlpipe.utility.helper import Helper
 
 
@@ -36,15 +37,15 @@ class TableQualityRegistry:
         return expr, on_split_keep, is_freshness
 
     # -------------------------------------------------------------------------
-    # 2. LOOKUP CHECK EXPR
+    # 2. LOOKUP CHECK EXPR & JOIN ROUTER
     # -------------------------------------------------------------------------
     @classmethod
-    def build_lookup_expr(cls, check: Dict[str, Any], ref_view: str) -> Tuple[str, bool, bool]:
-        """
-        Builds lookup expressions. 
-        Note: If 'select' is provided, perform a LEFT JOIN against `ref_view` 
-        in your main pipeline builder, or use simple scalar column references.
-        """
+    def build_lookup_expr(
+        cls, 
+        check: Dict[str, Any], 
+        ref_view: str, 
+        contain_select: bool = False
+    ) -> Union[Tuple[str, bool, bool], Dict[str, Any]]:
         source_key = check.get("key") or check.get("column")
         if not source_key:
             raise ValueError(f"[Lookup Error] Missing 'key' or 'column' specification in config: {check}")
@@ -63,59 +64,62 @@ class TableQualityRegistry:
         cleaned_source_key = Helper.clean_multiline_sql(str(source_key))
         cleaned_target_key = Helper.clean_multiline_sql(str(target_key))
 
+        raw_select = ref_meta.get("select") or check.get("select")
+        on_split_keep = check.get("on_split_keep", False)
         should_broadcast = ref_meta.get("broadcast", check.get("broadcast", True))
-        broadcast_hint = "/*+ BROADCAST(ref_tbl) */" if should_broadcast else ""
 
+        # ---------------------------------------------------------------------
+        # Case A: External JOIN Path (Triggered if select provided or contain_select=True)
+        # ---------------------------------------------------------------------
+        if raw_select or contain_select:
+            select_cols = []
+            if raw_select:
+                select_cols = [
+                    Helper.clean_multiline_sql(c.strip()) 
+                    for c in str(raw_select).replace("\n", ",").split(",") 
+                    if c.strip()
+                ]
+
+            return {
+                "check_type": "lookup",
+                "ref_view": ref_view,
+                "source_key": cleaned_source_key,
+                "target_key": cleaned_target_key,
+                "select_cols": select_cols,
+                "output_col": output_col,
+                "broadcast": should_broadcast,
+                "on_split_keep": on_split_keep,
+                "is_freshness": False
+            }
+
+        # ---------------------------------------------------------------------
+        # Case B: Subquery Validation Path (No extra projections required)
+        # ---------------------------------------------------------------------
         filter_str = ref_meta.get("filter") or check.get("filter")
         filter_sql = f"AND ({Helper.clean_multiline_sql(str(filter_str))})" if filter_str else ""
+        broadcast_hint = "/*+ BROADCAST(ref_tbl) */" if should_broadcast else ""
 
         target_expr = f"`ref_tbl`.`{cleaned_target_key}`" if " " not in cleaned_target_key and "(" not in cleaned_target_key else cleaned_target_key
         source_expr = f"`tmp_src`.`{cleaned_source_key}`" if " " not in cleaned_source_key and "(" not in cleaned_source_key else cleaned_source_key
 
-        raw_select = ref_meta.get("select") or check.get("select")
+        expr = f"""(CASE WHEN EXISTS (
+            SELECT {broadcast_hint} 1 
+            FROM `{ref_view}` AS `ref_tbl` 
+            WHERE {target_expr} = {source_expr} {filter_sql}
+        ) THEN 0 ELSE 1 END) AS `{output_col}`""".strip()
 
-        # ---------------------------------------------------------------------
-        # Case A: User supplied 'select' columns -> Avoid Correlated Subqueries
-        # Assume ref_view is joined externally as LEFT JOIN ref_view AS ref_tbl
-        # ---------------------------------------------------------------------
-        if raw_select:
-            select_cols = [
-                Helper.clean_multiline_sql(c.strip()) 
-                for c in str(raw_select).replace("\n", ",").split(",") 
-                if c.strip()
-            ]
-
-            # Build direct column aliases assuming LEFT JOIN is applied
-            projections = [
-                f"`ref_tbl`.`{col}` AS `{col}`" if " " not in col and "(" not in col else f"{col} AS `{col}`"
-                for col in select_cols
-            ]
-            
-            # Check validity based on target key join matching
-            validation_flag = f"CASE WHEN {target_expr} IS NULL THEN 1 ELSE 0 END AS `{output_col}`"
-            
-            expr = ", ".join(projections + [validation_flag])
-
-        # ---------------------------------------------------------------------
-        # Case B: Validation only (No extra attributes requested)
-        # ---------------------------------------------------------------------
-        else:
-            expr = f"""(CASE WHEN EXISTS (
-                SELECT {broadcast_hint} 1 
-                FROM `{ref_view}` AS `ref_tbl` 
-                WHERE {target_expr} = {source_expr} {filter_sql}
-            ) THEN 0 ELSE 1 END) AS `{output_col}`""".strip()
-
-        on_split_keep = check.get("on_split_keep", False)
-        is_freshness = False
-
-        return expr, on_split_keep, is_freshness
+        return expr, on_split_keep, False
 
     # -------------------------------------------------------------------------
-    # 3. FOREIGN KEY CHECK EXPR
+    # 3. FOREIGN KEY CHECK EXPR & JOIN ROUTER
     # -------------------------------------------------------------------------
     @classmethod
-    def build_foreign_key_expr(cls, check: Dict[str, Any], ref_view: str) -> Tuple[str, bool, bool]:
+    def build_foreign_key_expr(
+        cls, 
+        check: Dict[str, Any], 
+        ref_view: str, 
+        contain_select: bool = False
+    ) -> Union[Tuple[str, bool, bool], Dict[str, Any]]:
         ref_cfg = check.get("ref", {}) if isinstance(check.get("ref"), dict) else {}
         if isinstance(check.get("ref"), str):
             ref_cfg = {"table": check.get("ref")}
@@ -136,10 +140,39 @@ class TableQualityRegistry:
         cleaned_fk_col = Helper.clean_multiline_sql(str(fk_col))
         cleaned_ref_key = Helper.clean_multiline_sql(str(ref_key))
 
+        raw_select = ref_cfg.get("select") or check.get("select")
+        on_split_keep = check.get("on_split_keep", False)
+        should_broadcast = ref_cfg.get("broadcast", check.get("broadcast", True))
+
+        # ---------------------------------------------------------------------
+        # Case A: External JOIN Path
+        # ---------------------------------------------------------------------
+        if raw_select or contain_select:
+            select_cols = []
+            if raw_select:
+                select_cols = [
+                    Helper.clean_multiline_sql(c.strip()) 
+                    for c in str(raw_select).replace("\n", ",").split(",") 
+                    if c.strip()
+                ]
+
+            return {
+                "check_type": "foreign_key",
+                "ref_view": ref_view,
+                "source_key": cleaned_fk_col,
+                "target_key": cleaned_ref_key,
+                "select_cols": select_cols,
+                "output_col": output_column,
+                "broadcast": should_broadcast,
+                "on_split_keep": on_split_keep,
+                "is_freshness": False
+            }
+
+        # ---------------------------------------------------------------------
+        # Case B: Subquery Validation Path
+        # ---------------------------------------------------------------------
         filter_str = ref_cfg.get("filter") or check.get("filter")
         filter_sql = f"AND ({Helper.clean_multiline_sql(str(filter_str))})" if filter_str else ""
-
-        should_broadcast = ref_cfg.get("broadcast", check.get("broadcast", True))
         broadcast_hint = "/*+ BROADCAST(r) */" if should_broadcast else ""
 
         fk_expr = f"tmp_src.`{cleaned_fk_col}`" if " " not in cleaned_fk_col and "(" not in cleaned_fk_col else cleaned_fk_col
@@ -156,10 +189,7 @@ class TableQualityRegistry:
             ELSE 0 
         END AS `{output_column}`""".strip()
 
-        on_split_keep = check.get("on_split_keep", False)
-        is_freshness = False
-
-        return expr, on_split_keep, is_freshness
+        return expr, on_split_keep, False
 
     # -------------------------------------------------------------------------
     # 4. FRESHNESS CHECK EXPR
